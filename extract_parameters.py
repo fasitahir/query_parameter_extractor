@@ -46,9 +46,8 @@ def correct_spelling(text):
     return spell(text)
 
 def extract_cities_multiword(text):
-    """Extract multi-word cities first, then single word cities"""
+    """Extract multi-word cities first, then single word cities, and IATA codes"""
     text_lower = text.lower()
-    text_upper = text.upper()
     found_cities = []
     
     # First, check for IATA codes (3-letter uppercase codes)
@@ -63,10 +62,7 @@ def extract_cities_multiword(text):
             words_before = len(text[:start_pos].split())
             found_cities.append((iata_code, words_before, start_pos))
     
-    # If IATA codes found, return them (they take priority)
-    if found_cities:
-        return found_cities
-    
+    # Also check for city names (don't return early, combine with IATA codes)
     # Sort cities by length (longest first) to match multi-word cities first
     sorted_cities = sorted(city_names, key=len, reverse=True)
     
