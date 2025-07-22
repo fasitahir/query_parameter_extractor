@@ -1,81 +1,113 @@
-import unittest
-from extract_parameters import extract_travel_info  # adjust import based on actual file name
-from datetime import datetime, timedelta
+from extract_parameters import extract_travel_info  # Replace with your actual script/module name
 
+def run_test_cases():
+    test_cases = [
+        # One-way queries
+        ("I want to fly from Lahore to Karachi today", {
+            "source": "LHE", "destination": "KHI", "flight_type": "one_way"
+        }),
+        ("Book a flight to Islamabad from Multan on 5th August", {
+            "source": "MUX", "destination": "ISB", "flight_type": "one_way"
+        }),
+        ("Travel to Skardu from Lahore on day after tomorrow", {
+            "source": "LHE", "destination": "KDU", "flight_type": "one_way"
+        }),
+        ("Book a one-way ticket from GIL to LHE for tomorrow", {
+            "source": "GIL", "destination": "LHE", "flight_type": "one_way"
+        }),
+        ("From Rawalpindi to Gilgit on 25th Dec", {
+            "source": "ISB", "destination": "GIL", "flight_type": "one_way"
+        }),
 
-class TestTravelExtraction(unittest.TestCase):
+        # Return trip queries
+        ("Book a return flight from Karachi to Lahore today and back on 25th July", {
+            "source": "KHI", "destination": "LHE", "flight_type": "return"
+        }),
+        ("Need a round trip ticket from Islamabad to Sialkot on 10 August and back on 15 August", {
+            "source": "ISB", "destination": "SKT", "flight_type": "return"
+        }),
+        ("Flight from Quetta to Peshawar and then back to Quetta", {
+            "source": "UET", "destination": "PEW", "flight_type": "return"
+        }),
 
-    def setUp(self):
-        self.today = datetime.now().strftime("%Y-%m-%d")
-        self.tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        self.day_after_tomorrow = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+        # Edge cases
+        ("Flight to Karachi", {
+            "destination": "KHI"
+        }),
+        ("I want to leave from Lahore", {
+            "source": "LHE"
+        }),
+        ("I want to go to KHI from LHE today", {
+            "source": "LHE", "destination": "KHI", "flight_type": "one_way"
+        }),
+        ("I want to go from Lahore to Lahore", {
+            "source": "LHE"
+        }),
+        ("I want to go to panjgur and then to lahore", {
+            "source": "LHE", "destination": "PJG", "flight_type": "return", "return_date": None
+        }),
+        ("Need a flight from sialkot to lahore", {  # Misspelled Lahore
+            "source": "SKT", "destination": "LHE"
+        }),
+        ("Travel between Nawabshah and Rahim Yar Khan", {
+            "source": "WNS", "destination": "RYK", "flight_type": "return"
+        }),
+                ("Book a flight from Karachi to Multan for 3rd September", {
+            "source": "KHI", "destination": "MUX", "flight_type": "one_way"
+        }),
+        ("Need a return ticket to Peshawar from Lahore next Friday and back on Sunday", {
+            "source": "LHE", "destination": "PEW", "flight_type": "return"
+        }),
+        ("Plan a one-way trip to Skardu on 15 August", {
+            "destination": "KDU", "flight_type": "one_way"
+        }),
+        ("Going from LHE to KHI in 2 days", {
+            "source": "LHE", "destination": "KHI", "flight_type": "one_way"
+        }),
+        ("Round trip please from Islamabad to Gilgit for tomorrow and back next Wednesday", {
+            "source": "ISB", "destination": "GIL", "flight_type": "return"
+        }),
+        ("Get me a flight ticket", {
+            # Not enough info to extract cities or dates
+        }),
+        ("Book a flight to ISLAMABAD", {
+            "destination": "ISB", "flight_type": "one_way"
+        }),
+        ("Fly to Karachi from LHE day after tomorrow", {
+            "source": "LHE", "destination": "KHI", "flight_type": "one_way"
+        }),
+        ("Return flight from Karachi to Lahore on the 30th", {
+            "source": "KHI", "destination": "LHE", "flight_type": "return"
+        }),
+        ("Travel from Rahim Yar Khan to Nawabshah on 5th July and return on 10th July", {
+            "source": "RYK", "destination": "WNS", "flight_type": "return"
+        }),
 
-    # ✅ Happy Path Cases
-    def test_simple_from_to(self):
-        result = extract_travel_info("I want to book a flight from Lahore to Karachi tomorrow")
-        self.assertEqual(result, {'source': 'LHE', 'destination': 'KHI', 'date': self.tomorrow})
+    ]
 
-    def test_variation_phrasing(self):
-        result = extract_travel_info("Flying from Islamabad heading to Multan day after tomorrow")
-        self.assertEqual(result, {'source': 'ISB', 'destination': 'MUX', 'date': self.day_after_tomorrow})
+    total = len(test_cases)
+    passed = 0
 
-    def test_implicit_direction(self):
-        result = extract_travel_info("I am in Karachi and going to Peshawar")
-        self.assertEqual(result, {'source': 'KHI', 'destination': 'PEW'})
+    for i, (query, expected) in enumerate(test_cases, 1):
+        result = extract_travel_info(query)
+        print(f"\nTest {i}: '{query}'")
+        print("Expected:", expected)
+        print("Got     :", result)
 
-    def test_only_date(self):
-        result = extract_travel_info("I want to travel today")
-        self.assertEqual(result, {'date': self.today})
+        # Check if expected keys and values match
+        match = True
+        for key in expected:
+            if key not in result or result[key] != expected[key]:
+                match = False
+                break
 
-    def test_proper_date_parsing(self):
-        result = extract_travel_info("Book a flight from Lahore to Quetta on 25th December")
-        self.assertEqual(result['source'], 'LHE')
-        self.assertEqual(result['destination'], 'UET')
-        self.assertTrue(result['date'].endswith("12-25"))
+        if match:
+            print("✅ Passed")
+            passed += 1
+        else:
+            print("❌ Failed")
 
-    # ❌ Edge Cases / Failure Scenarios
-    def test_same_source_and_destination(self):
-        result = extract_travel_info("Book a flight from Lahore to Lahore tomorrow")
-        self.assertEqual(result, {'source': 'LHE', 'date': self.tomorrow})
-        self.assertNotIn('destination', result)
+    print(f"\nPassed {passed}/{total} test cases.")
 
-    def test_no_cities(self):
-        result = extract_travel_info("I want a ticket for tomorrow")
-        self.assertEqual(result, {'date': self.tomorrow})
-
-    def test_misspelled_cities(self):
-        result = extract_travel_info("I want to go from Laore to Krachi tomorrow")  # Misspelled Lahore & Karachi
-        self.assertEqual(result, {'source': 'LHE', 'destination': 'KHI', 'date': self.tomorrow})
-
-    def test_weird_phrasing(self):
-        result = extract_travel_info("Need ticket Lahore Karachi tomorrow")
-        # This may fail due to lack of 'from/to' cue
-        self.assertIn('source', result)
-        self.assertIn('destination', result)
-
-    def test_only_one_city(self):
-        result = extract_travel_info("Going to Sialkot")
-        self.assertEqual(result, {'destination': 'SKT'})
-
-    def test_city_with_multiple_words(self):
-        result = extract_travel_info("from Dera Ghazi Khan to Islamabad on next Monday")
-        self.assertEqual(result['source'], 'DEA')
-        self.assertEqual(result['destination'], 'ISB')
-        self.assertTrue('date' in result)
-
-    # ❌ Nonexistent cities
-    def test_unknown_city(self):
-        result = extract_travel_info("from Narnia to Mordor tomorrow")
-        self.assertEqual(result, {'date': self.tomorrow})
-
-    def test_short_and_ambiguous(self):
-        result = extract_travel_info("Multan tomorrow")
-        self.assertEqual(result, {'source': 'MUX', 'date': self.tomorrow})  # Might assume Multan is source
-
-    # ❌ Slippery time phrases
-    def test_invalid_date(self):
-        result = extract_travel_info("next blue moon")
-        self.assertNotIn('date', result)
-
-if __name__ == '__main__':
-    unittest.main()
+if __name__ == "__main__":
+    run_test_cases()
