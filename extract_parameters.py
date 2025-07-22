@@ -51,7 +51,6 @@ def extract_cities_multiword(text):
     found_cities = []
     
     # First, check for IATA codes (3-letter uppercase codes)
-    import re
     iata_pattern = r'\b[A-Z]{3}\b'
     iata_matches = re.finditer(iata_pattern, text.upper())
     
@@ -434,7 +433,7 @@ def extract_flight_class(query):
         
         for word in class_related_words:
             best_match, score, _ = process.extractOne(word, all_class_terms)
-            if score > 80:  # High threshold for class matching
+            if score > 75:  # High threshold for class matching
                 for class_name, keywords in class_mappings.items():
                     if best_match in keywords:
                         return class_name
@@ -478,6 +477,10 @@ def extract_flight_class(query):
     # Default fallback - return economy
     return "economy"
 
+import re
+from datetime import datetime, timedelta
+import parsedatetime
+
 def extract_dates(text, flight_type=None):
     """
     Unified date extraction function that handles both one-way and return flights.
@@ -485,188 +488,179 @@ def extract_dates(text, flight_type=None):
     """
     original_text = text.lower()
     today = datetime.now()
-    
+
     # Special date mapping
     special_date_map = {
-        "today": today.strftime("%Y-%m-%d"),
+        "day after tomorrow": (today + timedelta(days=2)).strftime("%Y-%m-%d"),
         "tomorrow": (today + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "day after tomorrow": (today + timedelta(days=2)).strftime("%Y-%m-%d")
+        "today": today.strftime("%Y-%m-%d"),
     }
-    
+
     # Fix common date format issues
     text_fixed = re.sub(r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1\2 ', original_text)
-    
+    normalized_text = text_fixed.strip().lower()
     dates = []
-    
+
     # Auto-detect flight type if not provided
     if flight_type is None:
         flight_type = extract_flight_type(text)
-    
+
+    # ---- RETURN FLIGHT HANDLING ---- #
     if flight_type == "return":
-        # Strategy 1: Look for "between X and Y" pattern
+        # Strategy 1: Between X and Y
         between_pattern = r'between\s+(.*?)\s+and\s+(.*?)(?:\s|$|,|\.)'
-        between_matches = re.findall(between_pattern, text_fixed, re.IGNORECASE)
-        
+        between_matches = re.findall(between_pattern, normalized_text, re.IGNORECASE)
+
         if between_matches:
-            for match in between_matches:
-                date1_text, date2_text = match
-                date1_text = date1_text.strip().lower()
-                date2_text = date2_text.strip().lower()
-                
-                # Clean up the date text (remove extra words)
-                date1_text = re.sub(r'\b(of|the)\b', '', date1_text).strip()
-                date2_text = re.sub(r'\b(of|the)\b', '', date2_text).strip()
-                
-                # Parse first date
-                if date1_text in special_date_map:
-                    dates.append(special_date_map[date1_text])
-                else:
-                    try:
-                        cal = parsedatetime.Calendar()
-                        time_struct, parse_status = cal.parse(date1_text)
-                        if parse_status >= 1:
-                            departure_date = datetime(*time_struct[:6])
-                            dates.append(departure_date.strftime("%Y-%m-%d"))
-                    except:
-                        pass
-                
-                # Parse second date
-                if date2_text in special_date_map:
-                    dates.append(special_date_map[date2_text])
-                else:
-                    try:
-                        cal = parsedatetime.Calendar()
-                        time_struct, parse_status = cal.parse(date2_text)
-                        if parse_status >= 1:
-                            return_date = datetime(*time_struct[:6])
-                            dates.append(return_date.strftime("%Y-%m-%d"))
-                    except:
-                        pass
-                
-                if len(dates) >= 2:
-                    return dates[0], dates[1]
-        
-        # Strategy 2: Look for explicit date pairs with "and then" or "then"
+            for date1_text, date2_text in between_matches:
+                for label, date_str in zip(['departure', 'return'], [date1_text, date2_text]):
+                    date_str = re.sub(r'\b(of|the)\b', '', date_str.strip().lower())
+                    if date_str in special_date_map:
+                        dates.append((label, special_date_map[date_str]))
+                    else:
+                        try:
+                            cal = parsedatetime.Calendar()
+                            time_struct, parse_status = cal.parse(date_str)
+                            if parse_status >= 1:
+                                dates.append((label, datetime(*time_struct[:6]).strftime("%Y-%m-%d")))
+                        except:
+                            pass
+            if len(dates) >= 2:
+                return (
+                    next((d for l, d in dates if l == 'departure'), None),
+                    next((d for l, d in dates if l == 'return'), None)
+                )
+
+        # Strategy 2: Date pair patterns
         date_pair_patterns = [
             r'\b(today|tomorrow|day after tomorrow)\b.*?\b(?:and\s+(?:then\s+)?|then\s+)\b.*?\b(today|tomorrow|day after tomorrow)\b',
             r'\bon\s+([^,]+?)\s+and\s+(?:then\s+)?(?:on\s+)?([^,]+?)(?:\s|$|,)',
             r'\b(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)\s+(?:and\s+(?:then\s+)?|then\s+|to\s+)(?:on\s+)?(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)(?:\s|$|,)',
             r'(\d+(?:st|nd|rd|th)?\s+\w+)\s+(?:to|and|until)\s+(\d+(?:st|nd|rd|th)?\s+\w+)',
         ]
-        
+
         for pattern in date_pair_patterns:
-            matches = re.findall(pattern, text_fixed, re.IGNORECASE)
-            if matches:
+            matches = re.findall(pattern, normalized_text)
+            for match in matches:
+                if len(match) == 2:
+                    for label, date_str in zip(['departure', 'return'], match):
+                        date_str = date_str.strip().lower()
+                        if date_str in special_date_map:
+                            dates.append((label, special_date_map[date_str]))
+                        else:
+                            try:
+                                cal = parsedatetime.Calendar()
+                                time_struct, parse_status = cal.parse(date_str)
+                                if parse_status >= 1:
+                                    parsed_date = datetime(*time_struct[:6])
+                                    dates.append((label, parsed_date.strftime("%Y-%m-%d")))
+                            except:
+                                pass
+                if len(dates) >= 2:
+                    return (
+                        next((d for l, d in dates if l == 'departure'), None),
+                        next((d for l, d in dates if l == 'return'), None)
+                    )
+
+        # Strategy 3 & 4: Return and Departure Indicators
+        indicator_patterns = [
+            ("return", [
+                r'(?:come\s+back|return|back).*?(?:on\s+|must\s+on\s+|by\s+)([^,\.]+)',
+                r'(?:must\s+on|need\s+to\s+(?:come\s+)?back.*?on)\s+([^,\.]+)',
+                r'(?:return.*?on|back.*?on)\s+([^,\.]+)'
+            ]),
+            ("departure", [
+                r'(?:depart|leave|going|travel).*?(?:on\s+)([^,\.]+)',
+                r'(?:on\s+)([^,\.]+).*?(?:going|travel|depart|leave)'
+            ])
+        ]
+
+        for label, patterns in indicator_patterns:
+            for pattern in patterns:
+                matches = re.findall(pattern, normalized_text)
                 for match in matches:
-                    if len(match) == 2:
-                        date1_text, date2_text = match
-                        date1_text = date1_text.strip().lower()
-                        date2_text = date2_text.strip().lower()
-                        
-                        # Parse first date
-                        if date1_text in special_date_map:
-                            dates.append(special_date_map[date1_text])
-                        else:
-                            try:
-                                cal = parsedatetime.Calendar()
-                                time_struct, parse_status = cal.parse(date1_text)
-                                if parse_status >= 1:
-                                    departure_date = datetime(*time_struct[:6])
-                                    dates.append(departure_date.strftime("%Y-%m-%d"))
-                            except:
-                                pass
-                        
-                        # Parse second date
-                        if date2_text in special_date_map:
-                            dates.append(special_date_map[date2_text])
-                        else:
-                            try:
-                                cal = parsedatetime.Calendar()
-                                time_struct, parse_status = cal.parse(date2_text)
-                                if parse_status >= 1:
-                                    return_date = datetime(*time_struct[:6])
-                                    dates.append(return_date.strftime("%Y-%m-%d"))
-                            except:
-                                pass
-                        
-                        if len(dates) >= 2:
-                            return dates[0], dates[1]
-        
-        # Strategy 3: If no explicit pairs found, collect all dates
-        if len(dates) < 2:
-            dates = []
-            
-            # Collect special dates
-            for special_word in ["today", "tomorrow", "day after tomorrow"]:
-                if special_word in original_text:
-                    if special_date_map[special_word] not in dates:
-                        dates.append(special_date_map[special_word])
-            
-            # Try to parse additional dates from the text
+                    date_str = re.sub(r'\b(of|the)\b', '', match.strip().lower())
+                    if date_str in special_date_map:
+                        dates.append((label, special_date_map[date_str]))
+                    else:
+                        try:
+                            cal = parsedatetime.Calendar()
+                            time_struct, parse_status = cal.parse(date_str)
+                            if parse_status >= 1:
+                                parsed_date = datetime(*time_struct[:6])
+                                dates.append((label, parsed_date.strftime("%Y-%m-%d")))
+                        except:
+                            pass
+
+        # Strategy 5: Generic fallback special date match (longest match first)
+        if not dates:
+            sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
+            for word in sorted_specials:
+                if word in normalized_text:
+                    context_match = any(phrase in normalized_text for phrase in [
+                        f"come back {word}", f"return {word}", f"back {word}", f"must {word}"
+                    ])
+                    label = 'return' if context_match else 'departure'
+                    dates.append((label, special_date_map[word]))
+
+            # Try parsing remaining ambiguous dates
             if len(dates) < 2:
-                # Remove special words that we've already processed
-                text_without_special = text_fixed
-                for special_word in special_date_map.keys():
-                    if special_word in text_without_special:
-                        text_without_special = text_without_special.replace(special_word, "", 1)
-                
-                # Extract date-like patterns
+                text_without_special = normalized_text
+                for word in sorted_specials:
+                    text_without_special = text_without_special.replace(word, '', 1)
                 date_patterns = [
-                    r'\d+(?:st|nd|rd|th)?\s+(?:of\s+)?\w+',  # "15th December" or "15th of December"
-                    r'\w+\s+\d+(?:st|nd|rd|th)?',            # "December 15th"
-                    r'\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?',   # "12/15" or "12/15/2024"
+                    r'\d+(?:st|nd|rd|th)?\s+(?:of\s+)?\w+',
+                    r'\w+\s+\d+(?:st|nd|rd|th)?',
+                    r'\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?',
                 ]
-                
                 for pattern in date_patterns:
                     matches = re.findall(pattern, text_without_special)
                     for match in matches:
-                        if len(dates) >= 2:
-                            break
                         try:
                             cal = parsedatetime.Calendar()
-                            time_struct, parse_status = cal.parse(match.strip())
+                            time_struct, parse_status = cal.parse(match)
                             if parse_status >= 1:
                                 parsed_date = datetime(*time_struct[:6])
                                 date_str = parsed_date.strftime("%Y-%m-%d")
-                                if date_str not in dates:
-                                    dates.append(date_str)
+                                if any(phrase in text for phrase in ['return', 'back', 'come back']):
+                                    dates.append(('return', date_str))
+                                else:
+                                    dates.append(('departure', date_str))
                         except:
                             pass
-        
-        # Return results for return flight
-        if len(dates) >= 2:
-            return dates[0], dates[1]
-        elif len(dates) == 1:
-            return dates[0], None
+
+        # Final return for return flight
+        departure = next((d for l, d in dates if l == 'departure'), None)
+        return_date = next((d for l, d in dates if l == 'return'), None)
+        if departure or return_date:
+            return departure, return_date
         else:
-            # Last resort: try parsing the entire text
             try:
                 cal = parsedatetime.Calendar()
-                time_struct, parse_status = cal.parse(text_fixed)
+                time_struct, parse_status = cal.parse(normalized_text)
                 if parse_status >= 1:
                     departure_date = datetime(*time_struct[:6])
                     return departure_date.strftime("%Y-%m-%d"), None
             except:
                 pass
             return None, None
-    
+
+    # ---- ONE-WAY FLIGHT HANDLING ---- #
     else:
-        # One-way flight - extract single date
-        # Check special dates first
-        for special_word, special_date in special_date_map.items():
-            if special_word in original_text:
-                return special_date
-        
-        # Try parsedatetime for other dates
+        sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
+        for word in sorted_specials:
+            if word in normalized_text:
+                return special_date_map[word]
+
         try:
             cal = parsedatetime.Calendar()
-            time_struct, parse_status = cal.parse(text_fixed)
+            time_struct, parse_status = cal.parse(normalized_text)
             if parse_status >= 1:
                 parsed_date = datetime(*time_struct[:6])
                 return parsed_date.strftime("%Y-%m-%d")
         except:
             pass
-        
+
         return None
 
 def extract_travel_info(query):
