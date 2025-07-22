@@ -477,10 +477,6 @@ def extract_flight_class(query):
     # Default fallback - return economy
     return "economy"
 
-import re
-from datetime import datetime, timedelta
-import parsedatetime
-
 def extract_dates(text, flight_type=None):
     """
     Unified date extraction function that handles both one-way and return flights.
