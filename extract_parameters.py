@@ -4,6 +4,12 @@ from datetime import datetime, timedelta
 import parsedatetime
 from autocorrect import Speller
 import re
+import json
+from typing import Dict
+from dotenv import load_dotenv
+import os
+import google.generativeai as genai
+
 
 # Load spaCy English model
 nlp = spacy.load("en_core_web_sm")
@@ -659,10 +665,87 @@ def extract_dates(text, flight_type=None):
 
         return None
 
+
+
+def extract_passenger_count_llm(query: str, gemini_api_key: str = None) -> Dict[str, int]:
+    """
+    Extract passenger count using Gemini 1.5 Flash via official SDK.
+
+    Args:
+        query (str): User's travel query
+        gemini_api_key (str): Your Gemini API key for LLM-based extraction
+
+    Returns:
+        Dict[str, int]: Dictionary with 'adults', 'children', 'infants' counts
+    """
+    # Get API key from parameter or environment
+    if not gemini_api_key:
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+    
+    if not gemini_api_key:
+        raise ValueError("Gemini API key is required. Provide it as parameter or set GEMINI_API_KEY environment variable")
+
+    # Configure Gemini
+    genai.configure(api_key=gemini_api_key)
+
+    prompt = f"""
+    Analyze the following travel query and extract the number of passengers by category.
+
+    Rules:
+    1. If only "I" is mentioned, count as 1 adult
+    2. "Wife", "husband", "spouse", "partner" = 1 adult each
+    3. "Child", "kid", "son", "daughter" (typically 2-11 years) = 1 child each
+    4. "Baby", "infant", "toddler" (typically 0-2 years) = 1 infant each
+    5. Numbers like "2 people", "3 passengers" should be counted as adults unless specified
+    6. Family relationships: parents are adults, children are children unless age specified
+    7. If "family" is mentioned without specifics, assume 2 adults and 1 child
+    8. Age-based classification: 0-2 years = infant, 2-11 years = child, 12+ years = adult
+    9. If no passengers mentioned explicitly, default to 1 adult
+
+    Query: "{query}"
+
+    Respond ONLY with a JSON object in this exact format:
+    {{"adults": 0, "children": 0, "infants": 0}}
+    """
+
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt, generation_config={"temperature": 0.1, "max_output_tokens": 100})
+
+        # Safely parse output
+        generated_text = response.text.strip()
+        json_match = re.search(r'\{[^}]+\}', generated_text)
+        if json_match:
+            passenger_counts = json.loads(json_match.group())
+            return {
+                "adults": passenger_counts.get("adults", 1),
+                "children": passenger_counts.get("children", 0),
+                "infants": passenger_counts.get("infants", 0)
+            }
+
+        print("Failed to extract JSON from Gemini response.")
+        return {"adults": 1, "children": 0, "infants": 0}
+
+    except Exception as e:
+        print(f"LLM extraction failed: {e}")
+        return {"adults": 1, "children": 0, "infants": 0}
+
+
+
 def extract_travel_info(query):
     """
     Main function to extract all travel information from a query.
+    
+    Args:
+        query (str): User's travel query
+        passenger_extractor (PassengerCountExtractor): Instance of passenger count extractor
+        passenger_method (str): Method to use for passenger extraction ("nlp" or "llm")
+    
+    Returns:
+        dict: Dictionary containing all extracted travel information
     """
+    load_dotenv(override=True)
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
     result = {}
     
     # Extract cities
@@ -699,12 +782,34 @@ def extract_travel_info(query):
         if date:
             result["date"] = date
     
+    # Extract passenger count
+    try:
+        passenger_counts = extract_passenger_count_llm(query, gemini_api_key)
+        result["passengers"] = passenger_counts
+        
+        # Also add total passenger count for convenience
+        total_passengers = passenger_counts["adults"] + passenger_counts["children"] + passenger_counts["infants"]
+        result["total_passengers"] = total_passengers
+    except Exception as e:
+        print(f"Warning: Passenger count extraction failed: {e}")
+        # Fallback to default
+        result["passengers"] = {"adults": 1, "children": 0, "infants": 0}
+        result["total_passengers"] = 1
+    
     return result
 
-# Command-line interface
+
+# Enhanced command-line interface
 if __name__ == "__main__":
     while True:
-        query = input("Enter your travel query: ")
-        if query.strip().lower() in ["exit", "quit"]:
+        query = input("Enter your travel query: ").strip()
+        if query.lower() in ["exit", "quit"]:
+            print("Goodbye!")
             break
-        print(extract_travel_info(query))
+        if not query:
+            continue
+        try:
+            result = extract_travel_info(query)
+            print(result)
+        except Exception as e:
+            print(f"Error processing query: {e}")

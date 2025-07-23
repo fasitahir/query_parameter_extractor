@@ -87,8 +87,3 @@ python extract_parameters.py
 MIT License. Feel free to use, fork, and improve!
 
 ---
-
-## 👨‍💻 Author
-
-Built with ❤️ by [Your Name]  
-Need help? Open an issue or email me at you@example.com
