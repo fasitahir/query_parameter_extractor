@@ -72,6 +72,8 @@ python -m spacy download en_core_web_sm
 Create a `.env` file in the project root:
 
 ```bash
+BOOKME_SKY_USERNAME=your_username_here
+BOOKME_SKY_PASSWORD=your_password_here
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
