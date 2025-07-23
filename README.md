@@ -29,9 +29,12 @@ This project consists of:
 
 ```
 ├── extract_parameters.py      # Main travel query parser script
-├── requirements.txt          # Python dependencies
-├── README.md                 # Project documentation
-└── .env                      # Environment variables (create this file)
+├── travel_agent.py            # Conversational travel agent logic
+├── streamlit_ui.py            # Streamlit web UI for the agent
+├── test_parameter_parsing.py  # Unit tests for parameter extraction
+├── requirements.txt           # Python dependencies
+├── README.md                  # Project documentation
+└── .env                       # Environment variables (create this file)
 ```
 
 ---
