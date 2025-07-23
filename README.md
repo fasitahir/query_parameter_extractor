@@ -32,8 +32,8 @@ A comprehensive Python-based Travel Query Parser that extracts detailed travel i
 1. **Clone the repository**
 
 ```bash
-git clone https://github.com/yourusername/travel-query-parser.git
-cd travel-query-parser
+git clone https://github.com/fasitahir/travel-query-parser.git
+cd query_parameter_extractor
 ```
 
 2. **Create a virtual environment** (recommended)
