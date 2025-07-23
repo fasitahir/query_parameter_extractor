@@ -1,6 +1,15 @@
-# ✈️ Advanced Travel Query Parser
+# ✈️ Advanced Travel Query Parser & Conversational Travel Agent
 
-A comprehensive Python-based Travel Query Parser that extracts detailed travel information from natural language input. Perfect for travel chatbots, ticket booking automation systems, and flight search applications.
+A comprehensive Python-based system for extracting detailed travel information from natural language input and interacting with users via a conversational agent and a web UI. Perfect for travel chatbots, ticket booking automation systems, and flight search applications.
+
+---
+
+## 🗂️ Project Overview
+
+This project consists of:
+- **Travel Query Extractor**: Parses natural language travel queries to extract structured information (cities, dates, flight class, passenger count, etc.).
+- **Conversational Travel Agent**: An intelligent agent that interacts with users, processes travel requests, and leverages the extractor for information parsing.
+- **Streamlit Web UI**: A user-friendly web interface for interacting with the travel agent and visualizing parsed results.
 
 ---
 
@@ -73,20 +82,48 @@ To get a Gemini API key:
 
 ## 🚀 Usage
 
-### Command Line Interface
+### 1. Run the Streamlit Web UI (Recommended)
 
-Run the interactive parser:
+Launch the interactive travel agent web app:
+
+```bash
+streamlit run streamlit_ui.py
+```
+
+This will open a browser window where you can chat with the agent, enter travel queries, and see extracted details.
+
+### 2. Run the Extractor Standalone (Command Line)
+
+Test the travel query extractor directly:
 
 ```bash
 python extract_parameters.py
 ```
 
-### Python Integration
+This will prompt you for queries in the terminal and display the parsed results.
+
+### 3. Use the Agent in Python
+
+You can use the agent logic programmatically or as part of the UI. To run the agent logic directly (for development or integration):
+
+```bash
+python travel_agent.py
+```
+
+Or import and use the agent in your own scripts:
+
+```python
+from travel_agent import TravelAgent
+agent = TravelAgent()
+response = agent.process_query("I want to fly from Lahore to Karachi tomorrow")
+print(response)
+```
+
+### 4. Python Integration (Extractor Only)
 
 ```python
 from extract_parameters import extract_travel_info
 
-# Single query extraction
 query = "I want to fly from Lahore to Karachi tomorrow in business class with my wife"
 result = extract_travel_info(query)
 print(result)
