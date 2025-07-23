@@ -744,69 +744,6 @@ def extract_dates(text, flight_type=None):
         return None
 
 
-# def extract_passenger_count_llm(query: str, gemini_api_key: str = None) -> Dict[str, int]:
-#     """
-#     Extract passenger count using Gemini 1.5 Flash via official SDK.
-
-#     Args:
-#         query (str): User's travel query
-#         gemini_api_key (str): Your Gemini API key for LLM-based extraction
-
-#     Returns:
-#         Dict[str, int]: Dictionary with 'adults', 'children', 'infants' counts
-#     """
-#     # Get API key from parameter or environment
-#     if not gemini_api_key:
-#         gemini_api_key = os.getenv("GEMINI_API_KEY")
-    
-#     if not gemini_api_key:
-#         raise ValueError("Gemini API key is required. Provide it as parameter or set GEMINI_API_KEY environment variable")
-
-#     # Configure Gemini
-#     genai.configure(api_key=gemini_api_key)
-
-#     prompt = f"""
-#     Analyze the following travel query and extract the number of passengers by category.
-
-#     Rules:
-#     1. If only "I" is mentioned, count as 1 adult
-#     2. "Wife", "husband", "spouse", "partner" = 1 adult each
-#     3. "Child", "kid", "son", "daughter" (typically 2-11 years) = 1 child each
-#     4. "Baby", "infant", "toddler" (typically 0-2 years) = 1 infant each
-#     5. Numbers like "2 people", "3 passengers" should be counted as adults unless specified
-#     6. Family relationships: parents are adults, children are children unless age specified
-#     7. If "family" is mentioned without specifics, assume 2 adults and 1 child
-#     8. Age-based classification: 0-2 years = infant, 2-11 years = child, 12+ years = adult
-#     9. If no passengers mentioned explicitly, default to 1 adult
-
-#     Query: "{query}"
-
-#     Respond ONLY with a JSON object in this exact format:
-#     {{"adults": 0, "children": 0, "infants": 0}}
-#     """
-
-#     try:
-#         model = genai.GenerativeModel("gemini-1.5-flash")
-#         response = model.generate_content(prompt, generation_config={"temperature": 0.1, "max_output_tokens": 100})
-
-#         # Safely parse output
-#         generated_text = response.text.strip()
-#         json_match = re.search(r'\{[^}]+\}', generated_text)
-#         if json_match:
-#             passenger_counts = json.loads(json_match.group())
-#             return {
-#                 "adults": passenger_counts.get("adults", 1),
-#                 "children": passenger_counts.get("children", 0),
-#                 "infants": passenger_counts.get("infants", 0)
-#             }
-
-#         print("Failed to extract JSON from Gemini response.")
-#         return {"adults": 1, "children": 0, "infants": 0}
-
-#     except Exception as e:
-#         print(f"LLM extraction failed: {e}")
-#         return {"adults": 1, "children": 0, "infants": 0}
-
 def extract_passenger_count(query: str) -> Dict[str, int]:
     if not nlp:
         return {"adults": 1, "children": 0, "infants": 0}
@@ -851,6 +788,51 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
 
     tokens = [token.text.lower() for token in doc]
 
+    # Step 0: Age-based classification
+    # e.g. "my 1 year old son", "my 19 year old daughter"
+    for i, token in enumerate(tokens):
+        # Look for patterns like "X year old <category>"
+        if token.isdigit() and i+2 < len(tokens):
+            if tokens[i+1] in ["year", "years"] and tokens[i+2] == "old":
+                age = int(tokens[i])
+                # Try to find the category (son, daughter, child, etc.)
+                if i+3 < len(tokens):
+                    category = tokens[i+3]
+                    if category in infant_keywords:
+                        if age <= 2:
+                            infants += 1
+                            processed_indices.update([i, i+1, i+2, i+3])
+                        elif 2 < age <= 12:
+                            children += 1
+                            processed_indices.update([i, i+1, i+2, i+3])
+                        else:
+                            adults += 1
+                            processed_indices.update([i, i+1, i+2, i+3])
+                    elif category in child_keywords:
+                        if age <= 2:
+                            infants += 1
+                        elif 2 < age <= 12:
+                            children += 1
+                        elif 12 < age < 18:
+                            children += 1
+                        else:
+                            adults += 1
+                        processed_indices.update([i, i+1, i+2, i+3])
+                    elif category in adult_keywords:
+                        adults += 1
+                        processed_indices.update([i, i+1, i+2, i+3])
+                else:
+                    # If no category, use age only
+                    if age <= 2:
+                        infants += 1
+                    elif 2 < age <= 12:
+                        children += 1
+                    elif 12 < age < 18:
+                        children += 1
+                    else:
+                        adults += 1
+                    processed_indices.update([i, i+1, i+2])
+
     # Step 1: Special patterns like "family of 5"
     special_patterns = {
         'family of': 'total',
@@ -870,7 +852,6 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
                     num = extract_number(words_after[0])
                     if num:
                         if type_hint == 'total':
-                            # For "family of X", don't add speaker separately if already included
                             adults = num
                             family_or_group_found = True
                         else:
@@ -1052,6 +1033,7 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
         "children": max(0, children),
         "infants": max(0, infants)
     }
+
 def extract_airline(query):
     """
     Extract airline name from query with multiple strategies.
