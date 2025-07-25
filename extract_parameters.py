@@ -743,7 +743,6 @@ def extract_dates(text, flight_type=None):
 
         return None
 
-
 def extract_passenger_count(query: str) -> Dict[str, int]:
     if not nlp:
         return {"adults": 1, "children": 0, "infants": 0}
@@ -833,15 +832,44 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
                         adults += 1
                     processed_indices.update([i, i+1, i+2])
 
-    # Step 1: Special patterns like "family of 5"
+    # Step 1: Special patterns like "family of 5" (FIXED)
     special_patterns = {
-        'family of': 'total',
         'group of': 'adults',
         'party of': 'adults',
     }
 
     family_or_group_found = False
 
+    # Handle "family of X" specially - check what X refers to
+    if 'family of' in query_lower:
+        try:
+            start_idx = query_lower.index('family of')
+            after_pattern = query_lower[start_idx + len('family of'):].strip()
+            words_after = after_pattern.split()
+            if words_after:
+                num = extract_number(words_after[0])
+                if num:
+                    # Check if the number is followed by a specific category
+                    if len(words_after) > 1:
+                        category = words_after[1]
+                        if category in child_keywords:
+                            # "family of 2 children" - don't set total family size
+                            pass  # Let other steps handle the children count
+                        elif category in adult_keywords:
+                            # "family of 3 adults" - set adults count
+                            adults = max(adults, num)
+                        else:
+                            # "family of 5" (no specific category) - assume total family size
+                            adults = num
+                            family_or_group_found = True
+                    else:
+                        # "family of 5" (no specific category) - assume total family size
+                        adults = num
+                        family_or_group_found = True
+        except:
+            pass
+
+    # Handle other special patterns
     for pattern, type_hint in special_patterns.items():
         if pattern in query_lower:
             try:
@@ -851,10 +879,7 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
                 if words_after:
                     num = extract_number(words_after[0])
                     if num:
-                        if type_hint == 'total':
-                            adults = num
-                            family_or_group_found = True
-                        else:
+                        if type_hint == 'adults':
                             adults = max(adults, num)
             except:
                 pass
@@ -966,6 +991,7 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
             speaker_should_be_counted = True
 
         # Don't double-count if "family of X" already includes the speaker
+        # FIXED: Only avoid double counting if family_or_group_found is True AND it was total family size
         if speaker_should_be_counted and not family_or_group_found:
             adults += 1
     
@@ -1040,33 +1066,58 @@ def extract_airline(query):
     Returns standardized airline code or None if not found.
     """
     query_lower = query.lower().strip()
+    
+    # Add common city/location names to exclude from airline matching
+    excluded_locations = {
+        'lahore', 'karachi', 'islamabad', 'peshawar', 'quetta', 'multan',
+        'dubai', 'london', 'paris', 'new york', 'tokyo', 'singapore',
+        'mumbai', 'delhi', 'bangkok', 'kuala lumpur', 'doha', 'riyadh'
+        # Add more cities as needed
+    }
 
-    # Strategy 1: Direct keyword match
+    # Strategy 1: Direct keyword match (improved)
     sorted_keywords = sorted(all_airline_keywords, key=lambda x: len(x[0]), reverse=True)
     for keyword, airline_code in sorted_keywords:
+        # Ensure we're not matching city names
+        if keyword.lower() in excluded_locations:
+            continue
+            
         pattern = r'\b' + re.escape(keyword) + r'\b'
         if re.search(pattern, query_lower):
             return airline_code
 
-    # Strategy 2: Pattern-based extraction
+    # Strategy 2: Pattern-based extraction (fixed)
     airline_patterns = [
-        r'(?:fly|travel|book|reserve)\s+(?:with|on|via)\s+([a-zA-Z\s-]+?)(?:\s|$|,|\.|\?)',
-        r'([a-zA-Z\s-]+?)\s+(?:flight|ticket|airlines?|airways?|air)(?:\s|$|,|\.)',
-        r'(?:on|via|through)\s+([a-zA-Z\s-]+?)(?:\s|$|,|\.|\?)',
-        r'(?:prefer|want|need|like)\s+([a-zA-Z\s-]+?)(?:\s|$|,|\.|\?)',
-        r'\b([A-Z]{2,3})\s*\d{2,4}\b',
+        r'(?:fly|travel|book|reserve)\s+(?:with|on|via)\s+([a-zA-Z\s-]+?)(?:\s+(?:flight|ticket|airlines?|airways?)|$)',
+        r'([a-zA-Z\s-]+?)\s+(?:flight|ticket|airlines?|airways?)(?:\s|$|,|\.)',
+        r'(?:on|via|through)\s+([a-zA-Z\s-]+?)(?:\s+(?:flight|ticket|airlines?|airways?)|$)',
+        r'(?:prefer|want|need|like)\s+([a-zA-Z\s-]+?)(?:\s+(?:airline|airways?)|$)',
+        r'\b([A-Z]{2,3})\s*\d{2,4}\b',  # Flight codes
     ]
+    
     for pattern in airline_patterns:
         matches = re.findall(pattern, query_lower, re.IGNORECASE)
         for match in matches:
             extracted_text = match.strip().lower()
             if len(extracted_text) < 2:
                 continue
+                
+            # Skip if it's a known location
+            if extracted_text in excluded_locations:
+                continue
+                
+            # Only proceed if the extracted text contains airline-related keywords
+            airline_indicators = ['airline', 'airways', 'air', 'flight', 'jet']
+            if not any(indicator in extracted_text for indicator in airline_indicators):
+                continue
+                
             for keyword, airline_code in sorted_keywords:
+                if keyword.lower() in excluded_locations:
+                    continue
                 if extracted_text == keyword or keyword in extracted_text:
                     return airline_code
 
-# Strategy 3: NLP-based context extraction (safe version)
+    # Strategy 3: NLP-based context extraction (improved)
     try:
         doc = nlp(query_lower)
         airline_indicators = {"airlines", "airways", "air", "airline", "flight", "carrier"}
@@ -1074,26 +1125,35 @@ def extract_airline(query):
         for ent in doc.ents:
             if ent.label_ in {"ORG", "PERSON", "GPE"}:
                 ent_text = ent.text.lower()
+                
+                # Skip known locations
+                if ent_text in excluded_locations:
+                    continue
+                    
                 for keyword, airline_code in sorted_keywords:
+                    if keyword.lower() in excluded_locations:
+                        continue
                     if keyword == ent_text or keyword in ent_text:
                         return airline_code
 
         # Check token context only if an airline indicator exists in the sentence
         if any(word in query_lower for word in airline_indicators):
             for token in doc:
-                if token.pos_ == "PROPN":
+                if token.pos_ == "PROPN" and token.text.lower() not in excluded_locations:
                     start_idx = max(0, token.i - 2)
                     end_idx = min(len(doc), token.i + 3)
                     context_tokens = [t.text.lower() for t in doc[start_idx:end_idx]]
                     context_text = " ".join(context_tokens)
 
                     for keyword, airline_code in sorted_keywords:
+                        if keyword.lower() in excluded_locations:
+                            continue
                         if keyword in context_text:
                             return airline_code
     except Exception as e:
         print(f"[DEBUG] NLP strategy failed: {e}")
 
-    # Strategy 4: Fuzzy matching
+    # Strategy 4: Fuzzy matching (improved)
     try:
         doc = nlp(query_lower)
         airline_related_words = []
@@ -1102,31 +1162,90 @@ def extract_airline(query):
             if (token.pos_ in ["NOUN", "PROPN"] and 
                 len(token.text) > 3 and 
                 not token.is_stop and 
-                not token.like_num):
-                if token.text.lower() not in {"flight", "ticket", "booking", "travel", "trip", "journey", "airport", "departure", "arrival", "passenger", "seat"}:
+                not token.like_num and
+                token.text.lower() not in excluded_locations):
+                
+                excluded_words = {"flight", "ticket", "booking", "travel", "trip", 
+                                "journey", "airport", "departure", "arrival", 
+                                "passenger", "seat", "lahore", "karachi"}
+                
+                if token.text.lower() not in excluded_words:
                     airline_related_words.append(token.text.lower())
 
         for i in range(len(doc) - 1):
             if (doc[i].pos_ in ["NOUN", "PROPN"] and doc[i+1].pos_ in ["NOUN", "PROPN", "ADJ"]):
                 phrase = f"{doc[i].text} {doc[i+1].text}".lower()
-                if len(phrase) > 6:
+                if (len(phrase) > 6 and 
+                    not any(loc in phrase for loc in excluded_locations)):
                     airline_related_words.append(phrase)
 
-        all_keywords = [keyword for keyword, _ in sorted_keywords]
-        for word in airline_related_words:
-            result = process.extractOne(word, all_keywords)
-            if result:
-                best_match, score, _ = result
-                if score > 95:
-                    for keyword, airline_code in sorted_keywords:
-                        if keyword == best_match:
-                            print(f"[DEBUG] Matched via fuzzy: '{word}' → '{best_match}' (score: {score}) → {airline_code}")
-                            return airline_code
+        # Only proceed with fuzzy matching if we have airline indicators in the query
+        airline_indicators = ['airline', 'airways', 'air', 'flight', 'jet', 'carrier']
+        if any(indicator in query_lower for indicator in airline_indicators):
+            all_keywords = [keyword for keyword, _ in sorted_keywords 
+                          if keyword.lower() not in excluded_locations]
+            
+            for word in airline_related_words:
+                result = process.extractOne(word, all_keywords)
+                if result:
+                    best_match, score, _ = result
+                    if score > 95:  # Keep high threshold to avoid false positives
+                        for keyword, airline_code in sorted_keywords:
+                            if keyword == best_match:
+                                print(f"[DEBUG] Matched via fuzzy: '{word}' → '{best_match}' (score: {score}) → {airline_code}")
+                                return airline_code
 
     except Exception as e:
         print(f"[DEBUG] Fuzzy matching failed: {e}")
 
     return None
+
+
+# Additional helper function to validate airline extraction
+def validate_airline_extraction(query, extracted_airline):
+    """
+    Validate that the extracted airline makes sense in the context.
+    Returns True if valid, False if likely a false positive.
+    """
+    if not extracted_airline:
+        return True  # None is always valid
+    
+    query_lower = query.lower()
+    
+    # Check if query explicitly mentions flights or airlines
+    flight_indicators = ['flight', 'airline', 'airways', 'fly with', 'book with', 
+                        'travel with', 'prefer', 'carrier']
+    
+    has_flight_context = any(indicator in query_lower for indicator in flight_indicators)
+    
+    # If no flight context and it's just a route query, likely false positive
+    route_only_patterns = [
+        r'travel from .+ to .+$',
+        r'go from .+ to .+$',
+        r'.+ to .+$'
+    ]
+    
+    is_route_only = any(re.search(pattern, query_lower) for pattern in route_only_patterns)
+    
+    if is_route_only and not has_flight_context:
+        return False
+        
+    return True
+
+
+# Modified main extraction function with validation
+def extract_airline_safe(query):
+    """
+    Safe airline extraction with validation to prevent false positives.
+    """
+    extracted = extract_airline(query)
+    
+    if validate_airline_extraction(query, extracted):
+        return extracted
+    else:
+        print(f"[DEBUG] Rejected airline extraction '{extracted}' as likely false positive")
+        return None
+    
 
 def extract_travel_info(query):
     """
