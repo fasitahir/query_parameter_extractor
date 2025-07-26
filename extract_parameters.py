@@ -119,9 +119,6 @@ airline_mappings = {
 # Create a flattened list of all airline keywords for fuzzy matching
 all_airline_keywords = [(variation.lower(), code) for code, variations in airline_mappings.items() for variation in variations]
 
-
-
-
 city_names = list(city_to_iata.keys())
 # Create reverse mapping for IATA codes
 iata_codes = set(city_to_iata.values())
@@ -561,188 +558,6 @@ def extract_flight_class(query):
     # Default fallback - return economy
     return "economy"
 
-def extract_dates(text, flight_type=None):
-    """
-    Unified date extraction function that handles both one-way and return flights.
-    Returns single date for one-way, tuple (departure_date, return_date) for return flights.
-    """
-    original_text = text.lower()
-    today = datetime.now()
-
-    # Special date mapping
-    special_date_map = {
-        "day after tomorrow": (today + timedelta(days=2)).strftime("%Y-%m-%d"),
-        "tomorrow": (today + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "today": today.strftime("%Y-%m-%d"),
-    }
-
-    # Fix common date format issues
-    text_fixed = re.sub(r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1\2 ', original_text)
-    normalized_text = text_fixed.strip().lower()
-    dates = []
-
-    # Auto-detect flight type if not provided
-    if flight_type is None:
-        flight_type = extract_flight_type(text)
-
-    # ---- RETURN FLIGHT HANDLING ---- #
-    if flight_type == "return":
-        # Strategy 1: Between X and Y
-        between_pattern = r'between\s+(.?)\s+and\s+(.?)(?:\s|$|,|\.)'
-        between_matches = re.findall(between_pattern, normalized_text, re.IGNORECASE)
-
-        if between_matches:
-            for date1_text, date2_text in between_matches:
-                for label, date_str in zip(['departure', 'return'], [date1_text, date2_text]):
-                    date_str = re.sub(r'\b(of|the)\b', '', date_str.strip().lower())
-                    if date_str in special_date_map:
-                        dates.append((label, special_date_map[date_str]))
-                    else:
-                        try:
-                            cal = parsedatetime.Calendar()
-                            time_struct, parse_status = cal.parse(date_str)
-                            if parse_status >= 1:
-                                dates.append((label, datetime(*time_struct[:6]).strftime("%Y-%m-%d")))
-                        except:
-                            pass
-            if len(dates) >= 2:
-                return (
-                    next((d for l, d in dates if l == 'departure'), None),
-                    next((d for l, d in dates if l == 'return'), None)
-                )
-
-        # Strategy 2: Date pair patterns
-        date_pair_patterns = [
-            r'\b(today|tomorrow|day after tomorrow)\b.?\b(?:and\s+(?:then\s+)?|then\s+)\b.?\b(today|tomorrow|day after tomorrow)\b',
-            r'\bon\s+([^,]+?)\s+and\s+(?:then\s+)?(?:on\s+)?([^,]+?)(?:\s|$|,)',
-            r'\b(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)\s+(?:and\s+(?:then\s+)?|then\s+|to\s+)(?:on\s+)?(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)(?:\s|$|,)',
-            r'(\d+(?:st|nd|rd|th)?\s+\w+)\s+(?:to|and|until)\s+(\d+(?:st|nd|rd|th)?\s+\w+)',
-        ]
-
-        for pattern in date_pair_patterns:
-            matches = re.findall(pattern, normalized_text)
-            for match in matches:
-                if len(match) == 2:
-                    for label, date_str in zip(['departure', 'return'], match):
-                        date_str = date_str.strip().lower()
-                        if date_str in special_date_map:
-                            dates.append((label, special_date_map[date_str]))
-                        else:
-                            try:
-                                cal = parsedatetime.Calendar()
-                                time_struct, parse_status = cal.parse(date_str)
-                                if parse_status >= 1:
-                                    parsed_date = datetime(*time_struct[:6])
-                                    dates.append((label, parsed_date.strftime("%Y-%m-%d")))
-                            except:
-                                pass
-                if len(dates) >= 2:
-                    return (
-                        next((d for l, d in dates if l == 'departure'), None),
-                        next((d for l, d in dates if l == 'return'), None)
-                    )
-
-        # Strategy 3 & 4: Return and Departure Indicators
-        indicator_patterns = [
-            ("return", [
-                r'(?:come\s+back|return|back).*?(?:on\s+|must\s+on\s+|by\s+)([^,\.]+)',
-                r'(?:must\s+on|need\s+to\s+(?:come\s+)?back.*?on)\s+([^,\.]+)',
-                r'(?:return.?on|back.?on)\s+([^,\.]+)'
-            ]),
-            ("departure", [
-                r'(?:depart|leave|going|travel).*?(?:on\s+)([^,\.]+)',
-                r'(?:on\s+)([^,\.]+).*?(?:going|travel|depart|leave)'
-            ])
-        ]
-
-        for label, patterns in indicator_patterns:
-            for pattern in patterns:
-                matches = re.findall(pattern, normalized_text)
-                for match in matches:
-                    date_str = re.sub(r'\b(of|the)\b', '', match.strip().lower())
-                    if date_str in special_date_map:
-                        dates.append((label, special_date_map[date_str]))
-                    else:
-                        try:
-                            cal = parsedatetime.Calendar()
-                            time_struct, parse_status = cal.parse(date_str)
-                            if parse_status >= 1:
-                                parsed_date = datetime(*time_struct[:6])
-                                dates.append((label, parsed_date.strftime("%Y-%m-%d")))
-                        except:
-                            pass
-
-        # Strategy 5: Generic fallback special date match (longest match first)
-        if not dates:
-            sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
-            for word in sorted_specials:
-                if word in normalized_text:
-                    context_match = any(phrase in normalized_text for phrase in [
-                        f"come back {word}", f"return {word}", f"back {word}", f"must {word}"
-                    ])
-                    label = 'return' if context_match else 'departure'
-                    dates.append((label, special_date_map[word]))
-
-            # Try parsing remaining ambiguous dates
-            if len(dates) < 2:
-                text_without_special = normalized_text
-                for word in sorted_specials:
-                    text_without_special = text_without_special.replace(word, '', 1)
-                date_patterns = [
-                    r'\d+(?:st|nd|rd|th)?\s+(?:of\s+)?\w+',
-                    r'\w+\s+\d+(?:st|nd|rd|th)?',
-                    r'\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?',
-                ]
-                for pattern in date_patterns:
-                    matches = re.findall(pattern, text_without_special)
-                    for match in matches:
-                        try:
-                            cal = parsedatetime.Calendar()
-                            time_struct, parse_status = cal.parse(match)
-                            if parse_status >= 1:
-                                parsed_date = datetime(*time_struct[:6])
-                                date_str = parsed_date.strftime("%Y-%m-%d")
-                                if any(phrase in text for phrase in ['return', 'back', 'come back']):
-                                    dates.append(('return', date_str))
-                                else:
-                                    dates.append(('departure', date_str))
-                        except:
-                            pass
-
-        # Final return for return flight
-        departure = next((d for l, d in dates if l == 'departure'), None)
-        return_date = next((d for l, d in dates if l == 'return'), None)
-        if departure or return_date:
-            return departure, return_date
-        else:
-            try:
-                cal = parsedatetime.Calendar()
-                time_struct, parse_status = cal.parse(normalized_text)
-                if parse_status >= 1:
-                    departure_date = datetime(*time_struct[:6])
-                    return departure_date.strftime("%Y-%m-%d"), None
-            except:
-                pass
-            return None, None
-
-    # ---- ONE-WAY FLIGHT HANDLING ---- #
-    else:
-        sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
-        for word in sorted_specials:
-            if word in normalized_text:
-                return special_date_map[word]
-
-        try:
-            cal = parsedatetime.Calendar()
-            time_struct, parse_status = cal.parse(normalized_text)
-            if parse_status >= 1:
-                parsed_date = datetime(*time_struct[:6])
-                return parsed_date.strftime("%Y-%m-%d")
-        except:
-            pass
-
-        return None
-
 def extract_passenger_count(query: str) -> Dict[str, int]:
     if not nlp:
         return {"adults": 1, "children": 0, "infants": 0}
@@ -787,8 +602,33 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
 
     tokens = [token.text.lower() for token in doc]
 
-    # Step 0: Age-based classification
-    # e.g. "my 1 year old son", "my 19 year old daughter"
+    # Step 0: Age-based classification and "one of them" patterns
+    # e.g. "my 1 year old son", "my 19 year old daughter", "3 kids one of them is under 1 year"
+    
+    # First handle "one of them is under X year" patterns
+    age_redistribution_patterns = [
+        r'one of them is under (\d+) year',
+        r'one of them is (\d+) year old',
+        r'one is under (\d+) year',
+        r'one is (\d+) year old',
+        r'(\d+) of them (?:are|is) under (\d+) year',
+        r'(\d+) of them (?:are|is) (\d+) year old'
+    ]
+    
+    for pattern in age_redistribution_patterns:
+        matches = re.findall(pattern, query_lower)
+        for match in matches:
+            if len(match) == 1:  # Single age match (one of them patterns)
+                age = int(match[0])
+                if age <= 2:
+                    # Mark that we need to redistribute from children to infants later
+                    processed_indices.add(-1)  # Special marker for redistribution
+            elif len(match) == 2:  # Count and age match
+                count, age = int(match[0]), int(match[1])
+                if age <= 2:
+                    processed_indices.add(-2)  # Special marker for multiple redistribution
+
+    # Handle direct age specifications like "X year old"
     for i, token in enumerate(tokens):
         # Look for patterns like "X year old <category>"
         if token.isdigit() and i+2 < len(tokens):
@@ -1039,7 +879,36 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
     elif 'several' in tokens:
         adults = max(adults, 4)  # Keep several as 4
 
-    # Step 11: Defaults and edge cases
+    # Step 11: Handle age redistribution patterns and defaults
+    
+    # Handle "one of them is under X year" redistribution
+    if -1 in processed_indices and children > 0:
+        # Move one child to infants
+        children -= 1
+        infants += 1
+        processed_indices.remove(-1)
+    
+    if -2 in processed_indices:
+        # Handle multiple redistribution cases if needed
+        processed_indices.remove(-2)
+    
+    # Handle other specific redistribution patterns
+    redistribution_patterns = [
+        (r'(\d+) kids?.* one of them is under (\d+) year', 'child_to_infant'),
+        (r'(\d+) children.* one of them is under (\d+) year', 'child_to_infant'),
+        (r'(\d+) kids?.* one is under (\d+) year', 'child_to_infant'),
+        (r'(\d+) children.* one is under (\d+) year', 'child_to_infant'),
+    ]
+    
+    for pattern, action in redistribution_patterns:
+        matches = re.findall(pattern, query_lower)
+        for match in matches:
+            if len(match) == 2:
+                total_count, age = int(match[0]), int(match[1])
+                if action == 'child_to_infant' and age <= 2 and children > 0:
+                    children -= 1
+                    infants += 1
+    
     if adults == 0 and children == 0 and infants == 0:
         adults = 1
     
@@ -1059,6 +928,190 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
         "children": max(0, children),
         "infants": max(0, infants)
     }
+
+
+
+def extract_dates(text, flight_type=None):
+    """
+    Unified date extraction function that handles both one-way and return flights.
+    Returns single date for one-way, tuple (departure_date, return_date) for return flights.
+    """
+    original_text = text.lower()
+    today = datetime.now()
+
+    # Special date mapping
+    special_date_map = {
+        "day after tomorrow": (today + timedelta(days=2)).strftime("%Y-%m-%d"),
+        "tomorrow": (today + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "today": today.strftime("%Y-%m-%d"),
+    }
+
+    # Fix common date format issues
+    text_fixed = re.sub(r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1\2 ', original_text)
+    normalized_text = text_fixed.strip().lower()
+    dates = []
+
+    # Auto-detect flight type if not provided
+    if flight_type is None:
+        flight_type = extract_flight_type(text)
+
+    # ---- RETURN FLIGHT HANDLING ---- #
+    if flight_type == "return":
+        # Strategy 1: Between X and Y
+        between_pattern = r'between\s+(.?)\s+and\s+(.?)(?:\s|$|,|\.)'
+        between_matches = re.findall(between_pattern, normalized_text, re.IGNORECASE)
+
+        if between_matches:
+            for date1_text, date2_text in between_matches:
+                for label, date_str in zip(['departure', 'return'], [date1_text, date2_text]):
+                    date_str = re.sub(r'\b(of|the)\b', '', date_str.strip().lower())
+                    if date_str in special_date_map:
+                        dates.append((label, special_date_map[date_str]))
+                    else:
+                        try:
+                            cal = parsedatetime.Calendar()
+                            time_struct, parse_status = cal.parse(date_str)
+                            if parse_status >= 1:
+                                dates.append((label, datetime(*time_struct[:6]).strftime("%Y-%m-%d")))
+                        except:
+                            pass
+            if len(dates) >= 2:
+                return (
+                    next((d for l, d in dates if l == 'departure'), None),
+                    next((d for l, d in dates if l == 'return'), None)
+                )
+
+        # Strategy 2: Date pair patterns
+        date_pair_patterns = [
+            r'\b(today|tomorrow|day after tomorrow)\b.?\b(?:and\s+(?:then\s+)?|then\s+)\b.?\b(today|tomorrow|day after tomorrow)\b',
+            r'\bon\s+([^,]+?)\s+and\s+(?:then\s+)?(?:on\s+)?([^,]+?)(?:\s|$|,)',
+            r'\b(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)\s+(?:and\s+(?:then\s+)?|then\s+|to\s+)(?:on\s+)?(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)(?:\s|$|,)',
+            r'(\d+(?:st|nd|rd|th)?\s+\w+)\s+(?:to|and|until)\s+(\d+(?:st|nd|rd|th)?\s+\w+)',
+        ]
+
+        for pattern in date_pair_patterns:
+            matches = re.findall(pattern, normalized_text)
+            for match in matches:
+                if len(match) == 2:
+                    for label, date_str in zip(['departure', 'return'], match):
+                        date_str = date_str.strip().lower()
+                        if date_str in special_date_map:
+                            dates.append((label, special_date_map[date_str]))
+                        else:
+                            try:
+                                cal = parsedatetime.Calendar()
+                                time_struct, parse_status = cal.parse(date_str)
+                                if parse_status >= 1:
+                                    parsed_date = datetime(*time_struct[:6])
+                                    dates.append((label, parsed_date.strftime("%Y-%m-%d")))
+                            except:
+                                pass
+                if len(dates) >= 2:
+                    return (
+                        next((d for l, d in dates if l == 'departure'), None),
+                        next((d for l, d in dates if l == 'return'), None)
+                    )
+
+        # Strategy 3 & 4: Return and Departure Indicators
+        indicator_patterns = [
+            ("return", [
+                r'(?:come\s+back|return|back).*?(?:on\s+|must\s+on\s+|by\s+)([^,\.]+)',
+                r'(?:must\s+on|need\s+to\s+(?:come\s+)?back.*?on)\s+([^,\.]+)',
+                r'(?:return.?on|back.?on)\s+([^,\.]+)'
+            ]),
+            ("departure", [
+                r'(?:depart|leave|going|travel).*?(?:on\s+)([^,\.]+)',
+                r'(?:on\s+)([^,\.]+).*?(?:going|travel|depart|leave)'
+            ])
+        ]
+
+        for label, patterns in indicator_patterns:
+            for pattern in patterns:
+                matches = re.findall(pattern, normalized_text)
+                for match in matches:
+                    date_str = re.sub(r'\b(of|the)\b', '', match.strip().lower())
+                    if date_str in special_date_map:
+                        dates.append((label, special_date_map[date_str]))
+                    else:
+                        try:
+                            cal = parsedatetime.Calendar()
+                            time_struct, parse_status = cal.parse(date_str)
+                            if parse_status >= 1:
+                                parsed_date = datetime(*time_struct[:6])
+                                dates.append((label, parsed_date.strftime("%Y-%m-%d")))
+                        except:
+                            pass
+
+        # Strategy 5: Generic fallback special date match (longest match first)
+        if not dates:
+            sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
+            for word in sorted_specials:
+                if word in normalized_text:
+                    context_match = any(phrase in normalized_text for phrase in [
+                        f"come back {word}", f"return {word}", f"back {word}", f"must {word}"
+                    ])
+                    label = 'return' if context_match else 'departure'
+                    dates.append((label, special_date_map[word]))
+
+            # Try parsing remaining ambiguous dates
+            if len(dates) < 2:
+                text_without_special = normalized_text
+                for word in sorted_specials:
+                    text_without_special = text_without_special.replace(word, '', 1)
+                date_patterns = [
+                    r'\d+(?:st|nd|rd|th)?\s+(?:of\s+)?\w+',
+                    r'\w+\s+\d+(?:st|nd|rd|th)?',
+                    r'\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?',
+                ]
+                for pattern in date_patterns:
+                    matches = re.findall(pattern, text_without_special)
+                    for match in matches:
+                        try:
+                            cal = parsedatetime.Calendar()
+                            time_struct, parse_status = cal.parse(match)
+                            if parse_status >= 1:
+                                parsed_date = datetime(*time_struct[:6])
+                                date_str = parsed_date.strftime("%Y-%m-%d")
+                                if any(phrase in text for phrase in ['return', 'back', 'come back']):
+                                    dates.append(('return', date_str))
+                                else:
+                                    dates.append(('departure', date_str))
+                        except:
+                            pass
+
+        # Final return for return flight
+        departure = next((d for l, d in dates if l == 'departure'), None)
+        return_date = next((d for l, d in dates if l == 'return'), None)
+        if departure or return_date:
+            return departure, return_date
+        else:
+            try:
+                cal = parsedatetime.Calendar()
+                time_struct, parse_status = cal.parse(normalized_text)
+                if parse_status >= 1:
+                    departure_date = datetime(*time_struct[:6])
+                    return departure_date.strftime("%Y-%m-%d"), None
+            except:
+                pass
+            return None, None
+
+    # ---- ONE-WAY FLIGHT HANDLING ---- #
+    else:
+        sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
+        for word in sorted_specials:
+            if word in normalized_text:
+                return special_date_map[word]
+
+        try:
+            cal = parsedatetime.Calendar()
+            time_struct, parse_status = cal.parse(normalized_text)
+            if parse_status >= 1:
+                parsed_date = datetime(*time_struct[:6])
+                return parsed_date.strftime("%Y-%m-%d")
+        except:
+            pass
+
+        return None
 
 def extract_airline(query):
     """

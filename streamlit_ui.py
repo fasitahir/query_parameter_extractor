@@ -277,15 +277,17 @@ def main():
     
     # Handle different conversation states
     if st.session_state.conversation_state == 'initial':
-        # Initial query input
-        user_query = st.text_input(
-            "🗣️ **Describe your travel plans:**",
-            placeholder="e.g., I want to fly from Lahore to Karachi tomorrow for 2 people",
-            key="initial_query"
-        )
-        
-        if st.button("🔍 Search Flights", type="primary"):
-            if user_query:
+        # Initial query input - Use a form to ensure proper submission
+        with st.form("initial_query_form"):
+            user_query = st.text_input(
+                "🗣️ **Describe your travel plans:**",
+                placeholder="e.g., I want to fly from Lahore to Karachi tomorrow for 2 people",
+                key="initial_query"
+            )
+            
+            submitted = st.form_submit_button("🔍 Search Flights", type="primary", use_container_width=True)
+            
+            if submitted and user_query:
                 add_to_chat(user_query, "user")
                 
                 with st.spinner("🔄 Processing your request..."):
@@ -309,11 +311,11 @@ def main():
                 
                 elif result["status"] == "error":
                     add_to_chat(f"❌ Error: {result['message']}", "agent")
-            else:
+            elif submitted and not user_query:
                 st.warning("Please enter your travel query.")
     
     elif st.session_state.conversation_state == 'missing_info':
-        # Handle missing information collection
+        # Handle missing information collection - Use a form for proper submission
         if st.session_state.current_missing_index < len(st.session_state.missing_attributes):
             current_attr = st.session_state.missing_attributes[st.session_state.current_missing_index]
             current_prompt = st.session_state.prompts[st.session_state.current_missing_index]
@@ -325,27 +327,27 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
-            user_input = st.text_input(
-                f"Your answer:",
-                key=f"missing_info_{st.session_state.current_missing_index}"
-            )
-            
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                if st.button("➡️ Submit"):
-                    if user_input:
-                        add_to_chat(f"Q: {current_prompt}", "agent")
-                        add_to_chat(user_input, "user")
-                        
-                        # Process the missing attribute
-                        st.session_state.extracted_info = st.session_state.agent.process_missing_attribute(
-                            current_attr, user_input, st.session_state.extracted_info
-                        )
-                        
-                        st.session_state.current_missing_index += 1
-                        st.rerun()
-                    else:
-                        st.warning("Please provide an answer.")
+            with st.form(f"missing_info_form_{st.session_state.current_missing_index}"):
+                user_input = st.text_input(
+                    f"Your answer:",
+                    key=f"missing_info_{st.session_state.current_missing_index}"
+                )
+                
+                submitted = st.form_submit_button("➡️ Submit", type="primary", use_container_width=True)
+                
+                if submitted and user_input:
+                    add_to_chat(f"Q: {current_prompt}", "agent")
+                    add_to_chat(user_input, "user")
+                    
+                    # Process the missing attribute
+                    st.session_state.extracted_info = st.session_state.agent.process_missing_attribute(
+                        current_attr, user_input, st.session_state.extracted_info
+                    )
+                    
+                    st.session_state.current_missing_index += 1
+                    st.rerun()
+                elif submitted and not user_input:
+                    st.warning("Please provide an answer.")
         
         else:
             # All missing info collected, move to confirmation
@@ -375,14 +377,15 @@ def main():
         
         # Option to start over
         st.markdown("---")
-        if st.button("🔄 Start Over", key="start_over_confirmation"):
-            st.session_state.conversation_state = 'initial'
-            st.session_state.extracted_info = {}
-            st.session_state.missing_attributes = []
-            st.session_state.current_missing_index = 0
-            st.session_state.chat_history = []
-            st.session_state.final_results = None
-            st.rerun()
+        with st.form("start_over_form"):
+            if st.form_submit_button("🔄 Start Over", use_container_width=True):
+                st.session_state.conversation_state = 'initial'
+                st.session_state.extracted_info = {}
+                st.session_state.missing_attributes = []
+                st.session_state.current_missing_index = 0
+                st.session_state.chat_history = []
+                st.session_state.final_results = None
+                st.rerun()
     
     elif st.session_state.conversation_state == 'complete':
         # Show final results
@@ -401,19 +404,21 @@ def main():
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🔍 New Search", key="new_search_complete"):
-                st.session_state.conversation_state = 'initial'
-                st.session_state.extracted_info = {}
-                st.session_state.missing_attributes = []
-                st.session_state.current_missing_index = 0
-                st.session_state.chat_history = []
-                st.session_state.final_results = None
-                st.rerun()
+            with st.form("new_search_form"):
+                if st.form_submit_button("🔍 New Search", type="primary", use_container_width=True):
+                    st.session_state.conversation_state = 'initial'
+                    st.session_state.extracted_info = {}
+                    st.session_state.missing_attributes = []
+                    st.session_state.current_missing_index = 0
+                    st.session_state.chat_history = []
+                    st.session_state.final_results = None
+                    st.rerun()
         
         with col2:
-            if st.button("🔄 Modify Search", key="modify_search_complete"):
-                st.session_state.conversation_state = 'confirmation'
-                st.rerun()
+            with st.form("modify_search_form"):
+                if st.form_submit_button("🔄 Modify Search", use_container_width=True):
+                    st.session_state.conversation_state = 'confirmation'
+                    st.rerun()
     
     # Sidebar with help
     with st.sidebar:
@@ -435,14 +440,15 @@ def main():
         """)
         
         if st.session_state.chat_history:
-            if st.button("🗑️ Clear Chat"):
-                st.session_state.chat_history = []
-                st.session_state.conversation_state = 'initial'
-                st.session_state.extracted_info = {}
-                st.session_state.missing_attributes = []
-                st.session_state.current_missing_index = 0
-                st.session_state.final_results = None
-                st.rerun()
+            with st.form("clear_chat_form"):
+                if st.form_submit_button("🗑️ Clear Chat", use_container_width=True):
+                    st.session_state.chat_history = []
+                    st.session_state.conversation_state = 'initial'
+                    st.session_state.extracted_info = {}
+                    st.session_state.missing_attributes = []
+                    st.session_state.current_missing_index = 0
+                    st.session_state.final_results = None
+                    st.rerun()
 
 if __name__ == "__main__":
     main()
