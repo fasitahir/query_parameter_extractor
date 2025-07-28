@@ -143,7 +143,6 @@ class ConversationalTravelAgent:
             if natural_parts:
                 base_context = " ".join(natural_parts)
                 contextual_query = f"{base_context}. Now {user_input}"
-                print(f"DEBUG contextual_query: {contextual_query}")
                 return contextual_query
             
         except Exception as e:
