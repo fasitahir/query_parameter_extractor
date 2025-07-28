@@ -53,6 +53,7 @@ class ConversationalTravelTerminal:
         self.awaiting_confirmation = False
         self.awaiting_modification = False
         self.search_completed = False
+        self.confirmation_shown = False  # Track if confirmation was already shown
         
         # Check if terminal supports colors
         if not (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()):
@@ -142,11 +143,13 @@ Ready to plan your next adventure? Just tell me where you'd like to go! 🌍"""
             self.awaiting_confirmation = False
             self.awaiting_modification = False
             self.search_completed = False
+            self.confirmation_shown = False
             self.print_chat_message(welcome_msg, "assistant")
             return True
         
         elif command in ['clear', 'clear history']:
             self.agent.conversation_history = []
+            self.confirmation_shown = False
             self.print_chat_message("I've cleared our conversation history! Let's start fresh. What's your travel plan?", "assistant")
             return True
         
@@ -158,7 +161,8 @@ Ready to plan your next adventure? Just tell me where you'd like to go! 🌍"""
         
         # Confirmation-related responses
         confirmation_yes = ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'correct', 'right', 'perfect', 'good', 
-                           'looks good', 'that\'s right', 'proceed', 'go ahead', 'search', 'find flights']
+                           'looks good', 'that\'s right', 'proceed', 'go ahead', 'search', 'find flights',
+                           'everything is great', 'everything looks good', 'that\'s perfect', 'you can search']
         confirmation_no = ['no', 'nope', 'not quite', 'incorrect', 'wrong', 'change', 'modify', 'edit', 'update']
         
         # Modification-related phrases
@@ -238,9 +242,10 @@ Ready to plan your next adventure? Just tell me where you'd like to go! 🌍"""
     
     def should_show_summary(self, booking_info: Dict) -> bool:
         """Determine if we should show the booking summary"""
-        # Only show summary when we have complete information for confirmation
+        # Only show summary when we have complete information for confirmation AND haven't shown it yet
         required_fields = ['source', 'destination', 'departure_date', 'flight_class', 'flight_type']
-        return all(booking_info.get(field) for field in required_fields)
+        has_complete_info = all(booking_info.get(field) for field in required_fields)
+        return has_complete_info and not self.confirmation_shown
     
     def process_conversation_turn(self, user_input: str):
         """Process a single turn in the conversation"""
@@ -257,6 +262,7 @@ Ready to plan your next adventure? Just tell me where you'd like to go! 🌍"""
         if intent == "confirm_and_search":
             # User confirmed, proceed with search
             self.awaiting_confirmation = False
+            self.confirmation_shown = False
             search_result = self.agent.execute_flight_search_with_conversation()
             
             if search_result["status"] == "complete":
@@ -269,14 +275,15 @@ Ready to plan your next adventure? Just tell me where you'd like to go! 🌍"""
             # User wants to modify something
             self.awaiting_confirmation = False
             self.awaiting_modification = True
+            self.confirmation_shown = False
             
             modification_result = self.agent.handle_modification_request(user_input)
             self.print_chat_message(modification_result["response"], "assistant")
             
-            # Check if we have all info after modification - but don't show duplicate summary
+            # Check if we have all info after modification
             missing_info = modification_result.get("missing_info", [])
             if not missing_info:
-                # Move to confirmation state without showing extra summary
+                # Move to confirmation state
                 self.awaiting_confirmation = True
                 self.awaiting_modification = False
         
@@ -290,18 +297,21 @@ Ready to plan your next adventure? Just tell me where you'd like to go! 🌍"""
                 self.awaiting_confirmation = True
                 self.awaiting_modification = False
                 
-                # Only show summary if it adds value and isn't redundant
+                # Only show summary if it adds value and hasn't been shown
                 if self.should_show_summary(result["current_info"]):
                     summary = self.show_booking_summary_naturally(result["current_info"])
-                    if summary and "Here's what I have" not in result["response"]:
+                    if summary:
                         self.print_chat_message(f"📋 **Quick Summary:**\n{summary}", "assistant")
+                        self.confirmation_shown = True
                         
             elif result["type"] == "gathering_info":
                 self.awaiting_confirmation = False
                 self.awaiting_modification = False
+                self.confirmation_shown = False
             elif result["type"] == "modification":
                 self.awaiting_modification = True
                 self.awaiting_confirmation = False
+                self.confirmation_shown = False
     
     def run_conversation_loop(self):
         """Main conversation loop"""

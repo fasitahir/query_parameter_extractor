@@ -77,6 +77,116 @@ class ConversationalTravelAgent:
             "timestamp": datetime.now().isoformat()
         })
 
+    def create_contextual_query(self, user_input):
+        """Create a natural language contextual query that includes current booking information"""
+        if not self.current_booking_info:
+            return user_input
+        
+        try:
+            # Build natural language context from current booking info
+            natural_parts = []
+            
+            # Base travel information
+            if self.current_booking_info.get('source') and self.current_booking_info.get('destination'):
+                natural_parts.append(f"travel from {self.current_booking_info['source']} to {self.current_booking_info['destination']}")
+            elif self.current_booking_info.get('source'):
+                natural_parts.append(f"travel from {self.current_booking_info['source']}")
+            elif self.current_booking_info.get('destination'):
+                natural_parts.append(f"go to {self.current_booking_info['destination']}")
+            
+            # Passengers information - be specific about types
+            passengers = self.current_booking_info.get('passengers', {'adults': 1, 'children': 0, 'infants': 0})
+            passenger_parts = []
+            if passengers['adults'] > 0:
+                if passengers['adults'] == 1:
+                    passenger_parts.append("1 adult")
+                else:
+                    passenger_parts.append(f"{passengers['adults']} adults")
+            if passengers['children'] > 0:
+                if passengers['children'] == 1:
+                    passenger_parts.append("1 child")
+                else:
+                    passenger_parts.append(f"{passengers['children']} children")
+            if passengers['infants'] > 0:
+                if passengers['infants'] == 1:
+                    passenger_parts.append("1 infant")
+                else:
+                    passenger_parts.append(f"{passengers['infants']} infants")
+            
+            if passenger_parts:
+                natural_parts.append(f"with {' and '.join(passenger_parts)}")
+            
+            # Date information
+            if self.current_booking_info.get('departure_date'):
+                natural_parts.append(f"departing on {self.current_booking_info['departure_date']}")
+            
+            if self.current_booking_info.get('return_date'):
+                natural_parts.append(f"returning on {self.current_booking_info['return_date']}")
+            
+            # Travel class
+            if self.current_booking_info.get('flight_class'):
+                class_name = self.current_booking_info['flight_class'].replace('_', ' ')
+                natural_parts.append(f"in {class_name} class")
+            
+            # Flight type
+            if self.current_booking_info.get('flight_type') == 'return':
+                natural_parts.append("round trip")
+            elif self.current_booking_info.get('flight_type') == 'one_way':
+                natural_parts.append("one way")
+            
+            # Airline preference
+            if self.current_booking_info.get('content_provider'):
+                airline_name = self.current_booking_info['content_provider'].replace('_', ' ').title()
+                natural_parts.append(f"with {airline_name}")
+            
+            # Create natural language contextual query
+            if natural_parts:
+                base_context = " ".join(natural_parts)
+                contextual_query = f"{base_context}. Now {user_input}"
+                print(f"DEBUG contextual_query: {contextual_query}")
+                return contextual_query
+            
+        except Exception as e:
+            print(f"Error creating contextual query: {e}")
+        
+        return user_input
+
+    def extract_with_context(self, user_input):
+        """Extract travel information with booking context"""
+        # Create contextual query that includes current booking information
+        contextual_query = self.create_contextual_query(user_input)
+        
+        # Extract information from the contextual query
+        extracted_info = extract_travel_info(contextual_query)
+        
+        return extracted_info
+
+    def update_booking_info_intelligently(self, extracted_info):
+        """Update booking info while preserving existing information"""
+        if not extracted_info:
+            return
+                
+        # Special handling for passengers to avoid resetting
+        if extracted_info.get('passengers'):
+            self.current_booking_info['passengers'] = extracted_info['passengers']
+        elif not self.current_booking_info.get('passengers'):
+            # If no passenger info exists, set default
+            self.current_booking_info['passengers'] = {"adults": 1, "children": 0, "infants": 0}
+        
+        # Update other fields - ONLY if the extracted value is not None/empty/null
+        for key, value in extracted_info.items():
+            if key != 'passengers' and value is not None and value != '' and value != 'null':
+                # Special handling for dates to avoid overwriting with None
+                if key in ['departure_date', 'return_date'] and not value:
+                    continue
+                
+                # Special handling for location codes
+                if key in ['source', 'destination'] and (not value or len(str(value)) < 2):
+                    continue
+                
+                self.current_booking_info[key] = value
+        
+
     def generate_conversational_response(self, user_input, context_info=None):
         """Generate natural conversational responses using LLM"""
         try:
@@ -103,6 +213,11 @@ class ConversationalTravelAgent:
                 if self.current_booking_info.get('content_provider'):
                     info_parts.append(f"Airline: {self.current_booking_info['content_provider']}")
                 
+                # Add passengers info properly
+                passengers = self.current_booking_info.get('passengers', {'adults': 1, 'children': 0, 'infants': 0})
+                total_passengers = passengers['adults'] + passengers['children'] + passengers['infants']
+                info_parts.append(f"Passengers: {total_passengers} total ({passengers['adults']} adults, {passengers['children']} children, {passengers['infants']} infants)")
+                
                 if info_parts:
                     current_info_summary = f"Current booking info: {', '.join(info_parts)}"
 
@@ -127,6 +242,9 @@ Rules:
 6. Avoid repetitive questions about same information
 7. If user changes something, acknowledge the change naturally
 8. Keep responses focused and helpful
+9. NEVER mention booking confirmation, payment, or ticket issuance - you are only SEARCHING for flights
+10. Use terms like "search for flights", "find options", "look for flights" - NOT "book", "confirm booking", or "process payment"
+11. If user confirms details, say you'll search for flights, not process a booking
 
 Respond naturally:
 """
@@ -146,23 +264,20 @@ Respond naturally:
         self.add_to_conversation(user_input, "user")
         
         try:
-            # Extract travel information from the input
-            extracted_info = extract_travel_info(user_input)
+            # Extract travel information with context
+            extracted_info = self.extract_with_context(user_input)
             
-            # Update current booking info with any new information
-            if extracted_info:
-                # Handle changes smoothly
-                old_info = self.current_booking_info.copy()
-                self.current_booking_info.update({k: v for k, v in extracted_info.items() if v})
-                
-                # Set default values for common fields if not specified
-                if not self.current_booking_info.get("flight_class"):
-                    self.current_booking_info["flight_class"] = "economy"
-                if not self.current_booking_info.get("flight_type"):
-                    self.current_booking_info["flight_type"] = "one_way"
-                if not self.current_booking_info.get("passengers"):
-                    self.current_booking_info["passengers"] = {"adults": 1, "children": 0, "infants": 0}
+            # Update current booking info intelligently
+            self.update_booking_info_intelligently(extracted_info)
             
+            # Set default values for common fields if not specified (only if not already set)
+            if not self.current_booking_info.get("flight_class"):
+                self.current_booking_info["flight_class"] = "economy"
+            if not self.current_booking_info.get("flight_type"):
+                self.current_booking_info["flight_type"] = "one_way"
+            if not self.current_booking_info.get('passengers'):
+                self.current_booking_info['passengers'] = {"adults": 1, "children": 0, "infants": 0}
+                            
             # Determine what's missing and generate appropriate response
             missing_info = self.identify_missing_information()
             
@@ -200,6 +315,58 @@ Respond naturally:
             return {
                 "response": error_response,
                 "type": "error",
+                "current_info": self.current_booking_info.copy(),
+                "missing_info": []
+            }
+
+    def handle_modification_request(self, user_input):
+        """Handle user requests to modify booking information"""
+        self.add_to_conversation(user_input, "user")
+        
+        try:
+            # Extract any new information from the modification request with context
+            extracted_info = self.extract_with_context(user_input)
+            
+            # Store old info for comparison
+            old_info = self.current_booking_info.copy()
+            
+            # Update current booking info intelligently
+            self.update_booking_info_intelligently(extracted_info)
+            
+            # Generate response about what was changed
+            changes_made = []
+            if extracted_info:
+                for key, new_value in extracted_info.items():
+                    if new_value and new_value != '' and new_value != 'null' and old_info.get(key) != new_value:
+                        if key == 'passengers':
+                            old_total = sum(old_info.get('passengers', {'adults': 1, 'children': 0, 'infants': 0}).values())
+                            new_total = sum(new_value.values()) if isinstance(new_value, dict) else new_value
+                            changes_made.append(f"passengers: {old_total} → {new_total}")
+                        else:
+                            old_val = old_info.get(key, 'not set')
+                            changes_made.append(f"{key}: {old_val} → {new_value}")
+            
+            if changes_made:
+                context = f"Changes made: {', '.join(changes_made)}"
+            else:
+                context = "User requested modification but no specific changes detected"
+            
+            response = self.generate_conversational_response(user_input, context)
+            self.add_to_conversation(response, "assistant")
+            
+            return {
+                "response": response,
+                "type": "modification",
+                "current_info": self.current_booking_info.copy(),
+                "missing_info": self.identify_missing_information()
+            }
+            
+        except Exception as e:
+            response = "I'd be happy to help you make changes! Could you tell me what you'd like to modify?"
+            self.add_to_conversation(response, "assistant")
+            return {
+                "response": response,
+                "type": "modification_error",
                 "current_info": self.current_booking_info.copy(),
                 "missing_info": []
             }
@@ -249,12 +416,18 @@ Respond naturally:
             passengers = info.get('passengers', {'adults': 1, 'children': 0, 'infants': 0})
             class_text = info.get('flight_class', 'economy').replace('_', ' ')
             
-            passenger_count = passengers['adults']
-            if passengers['children'] > 0 or passengers['infants'] > 0:
-                passenger_count += passengers['children'] + passengers['infants']
-                passenger_text = f"for {passenger_count} passengers"
+            total_passengers = passengers['adults'] + passengers['children'] + passengers['infants']
+            if total_passengers == 1:
+                passenger_text = "for 1 person"
+            elif passengers['children'] > 0 or passengers['infants'] > 0:
+                passenger_text = f"for {total_passengers} passengers ({passengers['adults']} adults"
+                if passengers['children'] > 0:
+                    passenger_text += f", {passengers['children']} children"
+                if passengers['infants'] > 0:
+                    passenger_text += f", {passengers['infants']} infants"
+                passenger_text += ")"
             else:
-                passenger_text = "for 1 adult" if passenger_count == 1 else f"for {passenger_count} adults"
+                passenger_text = f"for {passengers['adults']} adults"
             
             summary_parts.append(f"in {class_text} class {passenger_text}")
             
@@ -266,15 +439,16 @@ Respond naturally:
             summary = "Perfect! I have " + ", ".join(summary_parts) + airline_text + "."
             
             prompt = f"""
-Create a brief, friendly confirmation message for this flight booking:
+Create a brief, friendly confirmation message for this flight search:
 
 {summary}
 
 The message should:
 1. Confirm the details naturally
-2. Ask if they're ready to search or want to change anything
+2. Ask if they're ready to SEARCH for flights (not book - just search!)
 3. Be warm but concise
 4. Not repeat all the details again
+5. Use words like "search", "find flights", "look for options" - NOT "book", "confirm booking", or "process payment"
 
 Keep it short and conversational:
 """
@@ -286,53 +460,10 @@ Keep it short and conversational:
             # Fallback to simple confirmation
             route = f"{info.get('source', '?')} to {info.get('destination', '?')}"
             date = info.get('departure_date', 'your chosen date')
-            return f"Great! I have your {route} flight for {date}. Ready to search for the best options?"
-
-    def handle_modification_request(self, user_input):
-        """Handle user requests to modify booking information"""
-        self.add_to_conversation(user_input, "user")
-        
-        try:
-            # Extract any new information from the modification request
-            extracted_info = extract_travel_info(user_input)
-            
-            # Update current booking info
-            if extracted_info:
-                old_info = self.current_booking_info.copy()
-                self.current_booking_info.update({k: v for k, v in extracted_info.items() if v})
-                
-                # Generate response about what was changed
-                changes_made = []
-                for key, new_value in extracted_info.items():
-                    if new_value and old_info.get(key) != new_value:
-                        changes_made.append(f"{key}: {old_info.get(key, 'not set')} → {new_value}")
-                
-                if changes_made:
-                    context = f"Changes requested: {', '.join(changes_made)}"
-                else:
-                    context = "User wants to modify booking but no specific changes detected"
-            else:
-                context = "User wants to modify something but specifics unclear"
-            
-            response = self.generate_conversational_response(user_input, context)
-            self.add_to_conversation(response, "assistant")
-            
-            return {
-                "response": response,
-                "type": "modification",
-                "current_info": self.current_booking_info.copy(),
-                "missing_info": self.identify_missing_information()
-            }
-            
-        except Exception as e:
-            response = "I'd be happy to help you make changes! Could you tell me what you'd like to modify?"
-            self.add_to_conversation(response, "assistant")
-            return {
-                "response": response,
-                "type": "modification_error",
-                "current_info": self.current_booking_info.copy(),
-                "missing_info": []
-            }
+            passengers = info.get('passengers', {'adults': 1, 'children': 0, 'infants': 0})
+            total = passengers['adults'] + passengers['children'] + passengers['infants']
+            passenger_text = f"{total} passenger{'s' if total > 1 else ''}"
+            return f"Great! I have your {route} flight for {date} with {passenger_text}. Ready to search for the best options?"
 
     def execute_flight_search_with_conversation(self):
         """Execute flight search with conversational feedback"""
@@ -349,10 +480,7 @@ Keep it short and conversational:
                 }
             
             # Generate enthusiastic search start message
-            search_start_msg = self.generate_conversational_response(
-                "ready to search", 
-                "User confirmed they want to proceed with flight search"
-            )
+            search_start_msg = self.generate_search_start_message()
             self.add_to_conversation(search_start_msg, "assistant")
             
             # Execute the actual search
@@ -399,6 +527,32 @@ Keep it short and conversational:
                 "status": "error"
             }
 
+    def generate_search_start_message(self):
+        """Generate an enthusiastic message about starting the search"""
+        try:
+            info = self.current_booking_info
+            route = f"{info.get('source')} to {info.get('destination')}"
+            
+            prompt = f"""
+Generate a brief, enthusiastic message that you're about to start searching for flights from {route}.
+
+The message should:
+1. Be excited and positive
+2. Indicate you're starting the search process
+3. Be very brief (1-2 sentences max)
+4. Use terms like "searching", "looking", "finding" - NOT "booking" or "processing"
+
+Examples: "Excellent! Let me search for the best flights for you now!" or "Perfect! Searching for your flights right away!"
+
+Generate message:
+"""
+            
+            response = self.model.generate_content(prompt)
+            return response.text.strip()
+            
+        except Exception as e:
+            return "Excellent! Let me search for the best flight options for you now!"
+
     def generate_flight_results_response(self, flight_results, search_type):
         """Generate a conversational response about flight results"""
         try:
@@ -429,8 +583,9 @@ Generate a conversational, helpful response that:
 3. Mentions any issues or alternatives if no flights found
 4. Maintains a helpful, professional tone
 5. Offers next steps or asks what the user would prefer
+6. NEVER mentions booking, payment, or ticket confirmation - only search results
 
-Keep it conversational and informative.
+Keep it conversational and informative:
 """
             
             response = self.model.generate_content(prompt)

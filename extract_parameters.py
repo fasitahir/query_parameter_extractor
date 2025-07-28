@@ -1427,7 +1427,7 @@ def extract_travel_info(query):
         # Fallback to default
         result["passengers"] = {"adults": 1, "children": 0, "infants": 0}
         result["total_passengers"] = 1
-    
+    print("debug:", result)
     return result
 
 # Enhanced command-line interface
