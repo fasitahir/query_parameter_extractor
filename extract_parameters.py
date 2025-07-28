@@ -558,6 +558,9 @@ def extract_flight_class(query):
     # Default fallback - return economy
     return "economy"
 
+import re
+from typing import Dict
+
 def extract_passenger_count(query: str) -> Dict[str, int]:
     if not nlp:
         return {"adults": 1, "children": 0, "infants": 0}
@@ -602,75 +605,149 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
 
     tokens = [token.text.lower() for token in doc]
 
-    # Step 0: Age-based classification and "one of them" patterns
-    # e.g. "my 1 year old son", "my 19 year old daughter", "3 kids one of them is under 1 year"
+    # Step 0: Handle complex redistribution patterns first
+    redistribution_handled = False
     
-    # First handle "one of them is under X year" patterns
-    age_redistribution_patterns = [
-        r'one of them is under (\d+) year',
-        r'one of them is (\d+) year old',
-        r'one is under (\d+) year',
-        r'one is (\d+) year old',
-        r'(\d+) of them (?:are|is) under (\d+) year',
-        r'(\d+) of them (?:are|is) (\d+) year old'
+    # Handle both numbered and unnumbered "children one of them is Y year old" patterns
+    # Check numbered patterns first (more specific)
+    numbered_patterns = [
+        r'(\d+)\s+(?:children|kids?).*?one\s+of\s+them\s+is\s+(\d+)\s+years?\s+old',
+        r'(\d+)\s+(?:children|kids?).*?one\s+is\s+(\d+)\s+years?\s+old',
+        r'with\s+my\s+(\d+)\s+(?:children|kids?).*?one\s+of\s+them\s+is\s+(\d+)\s+years?\s+old',
+        r'with\s+my\s+(\d+)\s+(?:children|kids?).*?one\s+is\s+(\d+)\s+years?\s+old'
     ]
     
-    for pattern in age_redistribution_patterns:
+    # Check numbered patterns first
+    for pattern in numbered_patterns:
         matches = re.findall(pattern, query_lower)
-        for match in matches:
-            if len(match) == 1:  # Single age match (one of them patterns)
-                age = int(match[0])
-                if age <= 2:
-                    # Mark that we need to redistribute from children to infants later
-                    processed_indices.add(-1)  # Special marker for redistribution
-            elif len(match) == 2:  # Count and age match
-                count, age = int(match[0]), int(match[1])
-                if age <= 2:
-                    processed_indices.add(-2)  # Special marker for multiple redistribution
-
-    # Handle direct age specifications like "X year old"
-    for i, token in enumerate(tokens):
-        # Look for patterns like "X year old <category>"
-        if token.isdigit() and i+2 < len(tokens):
-            if tokens[i+1] in ["year", "years"] and tokens[i+2] == "old":
-                age = int(tokens[i])
-                # Try to find the category (son, daughter, child, etc.)
-                if i+3 < len(tokens):
-                    category = tokens[i+3]
-                    if category in infant_keywords:
-                        if age <= 2:
-                            infants += 1
-                            processed_indices.update([i, i+1, i+2, i+3])
-                        elif 2 < age <= 12:
-                            children += 1
-                            processed_indices.update([i, i+1, i+2, i+3])
-                        else:
-                            adults += 1
-                            processed_indices.update([i, i+1, i+2, i+3])
-                    elif category in child_keywords:
-                        if age <= 2:
-                            infants += 1
-                        elif 2 < age <= 12:
-                            children += 1
-                        elif 12 < age < 18:
-                            children += 1
-                        else:
-                            adults += 1
-                        processed_indices.update([i, i+1, i+2, i+3])
-                    elif category in adult_keywords:
-                        adults += 1
-                        processed_indices.update([i, i+1, i+2, i+3])
+        if matches:  # Only process if we have matches
+            match = matches[0]  # Take only the first match
+            total_count, age = int(match[0]), int(match[1])
+            
+            # Start with the total count, then redistribute based on ages
+            remaining_children = total_count - 1  # Subtract the one with specific age
+            
+            # Categorize the first child by age
+            if age <= 2:
+                infants += 1
+            elif 2 < age < 18:
+                children += 1
+            else:
+                adults += 1
+            
+            # Handle "other is X year old" pattern for the remaining child
+            other_match = re.search(r'(?:and\s+)?(?:the\s+)?other\s+(?:one\s+)?is\s+(\d+)\s+years?\s+old', query_lower)
+            if other_match and remaining_children > 0:
+                other_age = int(other_match.group(1))
+                remaining_children -= 1
+                
+                if other_age <= 2:
+                    infants += 1
+                elif 2 < other_age < 18:
+                    children += 1
                 else:
-                    # If no category, use age only
-                    if age <= 2:
+                    adults += 1
+            
+            # Add any remaining children to the children category
+            children += remaining_children
+            redistribution_handled = True
+            
+            # Mark relevant tokens as processed to avoid double counting
+            for i, token in enumerate(tokens):
+                if token == str(total_count) or token in ['children', 'kids', 'child', 'kid']:
+                    processed_indices.add(i)
+            break  # Exit after first successful pattern match
+    
+    # Only check unnumbered patterns if no numbered pattern matched
+    if not redistribution_handled:
+        unnumbered_patterns = [
+            r'(?:my\s+|with\s+my\s+)(?:children|kids?).*?one\s+of\s+them\s+is\s+(\d+)\s+years?\s+old',
+            r'(?:my\s+|with\s+my\s+)(?:children|kids?).*?one\s+is\s+(\d+)\s+years?\s+old'
+        ]
+        
+        for pattern in unnumbered_patterns:
+            matches = re.findall(pattern, query_lower)
+            if matches:  # Only process if we have matches
+                match = matches[0]  # Take only the first match
+                # For unnumbered "children", assume at least 2 (default for plural)
+                total_count = 2
+                age = int(match[0])
+                
+                # Start with the total count, then redistribute based on ages
+                remaining_children = total_count - 1  # Subtract the one with specific age
+                
+                # Categorize the first child by age
+                if age <= 2:
+                    infants += 1
+                elif 2 < age < 18:
+                    children += 1
+                else:
+                    adults += 1
+                
+                # Handle "other is X year old" pattern for the remaining child
+                other_match = re.search(r'(?:and\s+)?(?:the\s+)?other\s+(?:one\s+)?is\s+(\d+)\s+years?\s+old', query_lower)
+                if other_match and remaining_children > 0:
+                    other_age = int(other_match.group(1))
+                    remaining_children -= 1
+                    
+                    if other_age <= 2:
                         infants += 1
-                    elif 2 < age <= 12:
-                        children += 1
-                    elif 12 < age < 18:
+                    elif 2 < other_age < 18:
                         children += 1
                     else:
                         adults += 1
-                    processed_indices.update([i, i+1, i+2])
+                
+                # Add any remaining children to the children category
+                children += remaining_children
+                redistribution_handled = True
+                
+                # Mark relevant tokens as processed to avoid double counting
+                for i, token in enumerate(tokens):
+                    if token in ['children', 'kids', 'child', 'kid']:
+                        processed_indices.add(i)
+                break  # Exit after first successful pattern match
+
+    # Handle direct age specifications like "my 1 year old" or "my child who is 1 year old"
+    if not redistribution_handled:
+        for i, token in enumerate(tokens):
+            if i in processed_indices:
+                continue
+                
+            # Look for patterns like "X year old <category>" or "my child who is X year old"
+            if token.isdigit() and i+2 < len(tokens):
+                if tokens[i+1] in ["year", "years"] and tokens[i+2] == "old":
+                    age = int(tokens[i])
+                    
+                    # Look for category before or after the age
+                    category = None
+                    if i > 0 and tokens[i-1] in (child_keywords | infant_keywords | adult_keywords):
+                        category = tokens[i-1]
+                    elif i+3 < len(tokens) and tokens[i+3] in (child_keywords | infant_keywords | adult_keywords):
+                        category = tokens[i+3]
+                    elif i > 1 and tokens[i-2] in (child_keywords | infant_keywords | adult_keywords):
+                        category = tokens[i-2]
+                    
+                    # Special handling for "my child who is X year old"
+                    if not category:
+                        # Look for "child who is" pattern
+                        for j in range(max(0, i-5), i):
+                            if tokens[j] in child_keywords and j+2 < len(tokens) and tokens[j+2] == 'is':
+                                category = tokens[j]
+                                break
+                    
+                    if category or not category:  # Process age even without explicit category
+                        if age <= 2:
+                            infants += 1
+                        elif 2 < age < 18:
+                            children += 1
+                        else:
+                            adults += 1
+                        processed_indices.update([i, i+1, i+2])
+                        if category:
+                            for k, t in enumerate(tokens):
+                                if t == category:
+                                    processed_indices.add(k)
+                                    break
 
     # Step 1: Special patterns like "family of 5" (FIXED)
     special_patterns = {
@@ -725,51 +802,53 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
                 pass
 
     # Step 2: Handle number + category (Fixed to properly process all numbers)
-    i = 0
-    while i < len(tokens):
-        if i in processed_indices:
+    if not redistribution_handled:
+        i = 0
+        while i < len(tokens):
+            if i in processed_indices:
+                i += 1
+                continue
+
+            num = extract_number(tokens[i])
+            if num is not None:
+                for j in range(i + 1, min(i + 4, len(tokens))):
+                    word = tokens[j]
+                    if word in infant_keywords:
+                        infants += num
+                        processed_indices.add(j)
+                        break
+                    elif word in child_keywords:
+                        children += num
+                        processed_indices.add(j)
+                        break
+                    elif word in adult_keywords:
+                        adults += num
+                        processed_indices.add(j)
+                        break
+                    elif word in multi_adult_keywords:
+                        adults += num * multi_adult_keywords[word]
+                        processed_indices.add(j)
+                        break
+                processed_indices.add(i)
             i += 1
-            continue
 
-        num = extract_number(tokens[i])
-        if num is not None:
-            for j in range(i + 1, min(i + 4, len(tokens))):
-                word = tokens[j]
-                if word in infant_keywords:
-                    infants += num
-                    processed_indices.add(j)
-                    break
-                elif word in child_keywords:
-                    children += num
-                    processed_indices.add(j)
-                    break
-                elif word in adult_keywords:
-                    adults += num
-                    processed_indices.add(j)
-                    break
-                elif word in multi_adult_keywords:
-                    adults += num * multi_adult_keywords[word]
-                    processed_indices.add(j)
-                    break
-            processed_indices.add(i)
-        i += 1
-
-    # Step 3: Count individual mentions
-    for i, token in enumerate(tokens):
-        if i in processed_indices:
-            continue
-        if token in multi_adult_keywords:
-            adults += multi_adult_keywords[token]
-            processed_indices.add(i)
-        elif token in adult_keywords:
-            adults += 1
-            processed_indices.add(i)
-        elif token in child_keywords:
-            children += 1
-            processed_indices.add(i)
-        elif token in infant_keywords:
-            infants += 1
-            processed_indices.add(i)
+    # Step 3: Count individual mentions (skip if we have redistribution patterns)
+    if not redistribution_handled:
+        for i, token in enumerate(tokens):
+            if i in processed_indices:
+                continue
+            if token in multi_adult_keywords:
+                adults += multi_adult_keywords[token]
+                processed_indices.add(i)
+            elif token in adult_keywords:
+                adults += 1
+                processed_indices.add(i)
+            elif token in child_keywords:
+                children += 1
+                processed_indices.add(i)
+            elif token in infant_keywords:
+                infants += 1
+                processed_indices.add(i)
 
     # Step 4: Plural words with default counts (Fixed logic)
     plural_defaults = {
@@ -787,7 +866,7 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
                 tokens[j].isdigit() or tokens[j] in number_words
                 for j in range(max(0, plural_idx - 2), plural_idx)
             )
-            if not has_number_before:
+            if not has_number_before and not redistribution_handled:  # Don't apply defaults if we have redistribution
                 if plural in infant_keywords:
                     infants = max(infants, default_count)
                 elif plural in child_keywords:
@@ -813,7 +892,7 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
             "i want to travel with", "i'm traveling with", "i am traveling with", 
             "i will travel with", "i will go with", "book a flight for me and",
             "traveling with", "with my", "me and my", "i want to travel",
-            "i need to book", "book for me and"
+            "i need to book", "book for me and", "i have to travel with"
         ]
         
         for pattern in speaker_patterns:
@@ -826,14 +905,18 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
             speaker_should_be_counted = True
         
         # Special case: when first person is present with family members
-        family_indicators = ['wife', 'husband', 'kids', 'children', 'baby', 'babies']
+        family_indicators = ['wife', 'husband', 'kids', 'children', 'baby', 'babies', 'child']
         if has_first_person and any(word in tokens for word in family_indicators):
             speaker_should_be_counted = True
 
         # Don't double-count if "family of X" already includes the speaker
-        # FIXED: Only avoid double counting if family_or_group_found is True AND it was total family size
         if speaker_should_be_counted and not family_or_group_found:
             adults += 1
+    
+    # Handle cases where speaker is implied but not explicitly mentioned
+    # e.g., "with my 1 year old" implies the speaker is traveling
+    if has_with and not has_first_person and (children > 0 or infants > 0 or any(word in tokens for word in ['my', 'wife', 'husband'])):
+        adults = max(adults, 1)  # At least one adult must be traveling
     
     # Handle "Traveling with X children" case - implies speaker is traveling
     if 'traveling with' in query_lower and not has_first_person:
@@ -872,6 +955,10 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
     for pattern, count in compound_patterns.items():
         if pattern in query_lower:
             adults = max(adults, count)
+    
+    # FIX: Handle "travel with my wife" case specifically
+    if 'travel with my wife' in query_lower or 'travel with my husband' in query_lower:
+        adults = max(adults, 2)  # Speaker + spouse
 
     # Step 10: "few people" - Fixed to return 3 not 4
     if 'few people' in query_lower or 'a few people' in query_lower:
@@ -879,35 +966,7 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
     elif 'several' in tokens:
         adults = max(adults, 4)  # Keep several as 4
 
-    # Step 11: Handle age redistribution patterns and defaults
-    
-    # Handle "one of them is under X year" redistribution
-    if -1 in processed_indices and children > 0:
-        # Move one child to infants
-        children -= 1
-        infants += 1
-        processed_indices.remove(-1)
-    
-    if -2 in processed_indices:
-        # Handle multiple redistribution cases if needed
-        processed_indices.remove(-2)
-    
-    # Handle other specific redistribution patterns
-    redistribution_patterns = [
-        (r'(\d+) kids?.* one of them is under (\d+) year', 'child_to_infant'),
-        (r'(\d+) children.* one of them is under (\d+) year', 'child_to_infant'),
-        (r'(\d+) kids?.* one is under (\d+) year', 'child_to_infant'),
-        (r'(\d+) children.* one is under (\d+) year', 'child_to_infant'),
-    ]
-    
-    for pattern, action in redistribution_patterns:
-        matches = re.findall(pattern, query_lower)
-        for match in matches:
-            if len(match) == 2:
-                total_count, age = int(match[0]), int(match[1])
-                if action == 'child_to_infant' and age <= 2 and children > 0:
-                    children -= 1
-                    infants += 1
+    # Step 11: Final validation and cleanup
     
     if adults == 0 and children == 0 and infants == 0:
         adults = 1
@@ -929,16 +988,18 @@ def extract_passenger_count(query: str) -> Dict[str, int]:
         "infants": max(0, infants)
     }
 
-
-
 def extract_dates(text, flight_type=None):
     """
-    Unified date extraction function that handles both one-way and return flights.
-    Returns single date for one-way, tuple (departure_date, return_date) for return flights.
+    FIXED: Date extraction function that properly handles age mentions
     """
     original_text = text.lower()
     today = datetime.now()
 
+    # FIXED: Remove age mentions before parsing dates to prevent confusion
+    # Remove patterns like "10 year old", "1 year old", etc.
+    text_cleaned = re.sub(r'\b\d+\s+years?\s+old\b', '', original_text)
+    text_cleaned = re.sub(r'\b\d+\s+year\s+old\b', '', text_cleaned)
+    
     # Special date mapping
     special_date_map = {
         "day after tomorrow": (today + timedelta(days=2)).strftime("%Y-%m-%d"),
@@ -947,7 +1008,7 @@ def extract_dates(text, flight_type=None):
     }
 
     # Fix common date format issues
-    text_fixed = re.sub(r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1\2 ', original_text)
+    text_fixed = re.sub(r'(\d+)(st|nd|rd|th)\s+of\s+', r'\1\2 ', text_cleaned)
     normalized_text = text_fixed.strip().lower()
     dates = []
 
@@ -958,7 +1019,7 @@ def extract_dates(text, flight_type=None):
     # ---- RETURN FLIGHT HANDLING ---- #
     if flight_type == "return":
         # Strategy 1: Between X and Y
-        between_pattern = r'between\s+(.?)\s+and\s+(.?)(?:\s|$|,|\.)'
+        between_pattern = r'between\s+([^0-9]+?)\s+and\s+([^0-9]+?)(?:\s|$|,|\.)'
         between_matches = re.findall(between_pattern, normalized_text, re.IGNORECASE)
 
         if between_matches:
@@ -981,18 +1042,21 @@ def extract_dates(text, flight_type=None):
                     next((d for l, d in dates if l == 'return'), None)
                 )
 
-        # Strategy 2: Date pair patterns
+        # Strategy 2: Date pair patterns (excluding age patterns)
         date_pair_patterns = [
-            r'\b(today|tomorrow|day after tomorrow)\b.?\b(?:and\s+(?:then\s+)?|then\s+)\b.?\b(today|tomorrow|day after tomorrow)\b',
+            r'\b(today|tomorrow|day after tomorrow)\b.*?\b(?:and\s+(?:then\s+)?|then\s+)\b.*?\b(today|tomorrow|day after tomorrow)\b',
             r'\bon\s+([^,]+?)\s+and\s+(?:then\s+)?(?:on\s+)?([^,]+?)(?:\s|$|,)',
             r'\b(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)\s+(?:and\s+(?:then\s+)?|then\s+|to\s+)(?:on\s+)?(\d+(?:st|nd|rd|th)?(?:\s+\w+)?)(?:\s|$|,)',
-            r'(\d+(?:st|nd|rd|th)?\s+\w+)\s+(?:to|and|until)\s+(\d+(?:st|nd|rd|th)?\s+\w+)',
         ]
 
         for pattern in date_pair_patterns:
             matches = re.findall(pattern, normalized_text)
             for match in matches:
                 if len(match) == 2:
+                    # Skip if this looks like an age pattern
+                    if any(re.search(r'\d+.*?(year|old)', m) for m in match):
+                        continue
+                        
                     for label, date_str in zip(['departure', 'return'], match):
                         date_str = date_str.strip().lower()
                         if date_str in special_date_map:
@@ -1003,7 +1067,9 @@ def extract_dates(text, flight_type=None):
                                 time_struct, parse_status = cal.parse(date_str)
                                 if parse_status >= 1:
                                     parsed_date = datetime(*time_struct[:6])
-                                    dates.append((label, parsed_date.strftime("%Y-%m-%d")))
+                                    # FIXED: Ensure parsed date is not in the far future due to age confusion
+                                    if parsed_date.year <= today.year + 2:
+                                        dates.append((label, parsed_date.strftime("%Y-%m-%d")))
                             except:
                                 pass
                 if len(dates) >= 2:
@@ -1017,7 +1083,7 @@ def extract_dates(text, flight_type=None):
             ("return", [
                 r'(?:come\s+back|return|back).*?(?:on\s+|must\s+on\s+|by\s+)([^,\.]+)',
                 r'(?:must\s+on|need\s+to\s+(?:come\s+)?back.*?on)\s+([^,\.]+)',
-                r'(?:return.?on|back.?on)\s+([^,\.]+)'
+                r'(?:return.*?on|back.*?on)\s+([^,\.]+)'
             ]),
             ("departure", [
                 r'(?:depart|leave|going|travel).*?(?:on\s+)([^,\.]+)',
@@ -1029,6 +1095,10 @@ def extract_dates(text, flight_type=None):
             for pattern in patterns:
                 matches = re.findall(pattern, normalized_text)
                 for match in matches:
+                    # Skip age-related matches
+                    if re.search(r'\d+.*?(year|old)', match):
+                        continue
+                        
                     date_str = re.sub(r'\b(of|the)\b', '', match.strip().lower())
                     if date_str in special_date_map:
                         dates.append((label, special_date_map[date_str]))
@@ -1038,11 +1108,13 @@ def extract_dates(text, flight_type=None):
                             time_struct, parse_status = cal.parse(date_str)
                             if parse_status >= 1:
                                 parsed_date = datetime(*time_struct[:6])
-                                dates.append((label, parsed_date.strftime("%Y-%m-%d")))
+                                # FIXED: Ensure parsed date is reasonable
+                                if parsed_date.year <= today.year + 2:
+                                    dates.append((label, parsed_date.strftime("%Y-%m-%d")))
                         except:
                             pass
 
-        # Strategy 5: Generic fallback special date match (longest match first)
+        # Strategy 5: Generic fallback special date match
         if not dates:
             sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
             for word in sorted_specials:
@@ -1053,61 +1125,42 @@ def extract_dates(text, flight_type=None):
                     label = 'return' if context_match else 'departure'
                     dates.append((label, special_date_map[word]))
 
-            # Try parsing remaining ambiguous dates
-            if len(dates) < 2:
-                text_without_special = normalized_text
-                for word in sorted_specials:
-                    text_without_special = text_without_special.replace(word, '', 1)
-                date_patterns = [
-                    r'\d+(?:st|nd|rd|th)?\s+(?:of\s+)?\w+',
-                    r'\w+\s+\d+(?:st|nd|rd|th)?',
-                    r'\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?',
-                ]
-                for pattern in date_patterns:
-                    matches = re.findall(pattern, text_without_special)
-                    for match in matches:
-                        try:
-                            cal = parsedatetime.Calendar()
-                            time_struct, parse_status = cal.parse(match)
-                            if parse_status >= 1:
-                                parsed_date = datetime(*time_struct[:6])
-                                date_str = parsed_date.strftime("%Y-%m-%d")
-                                if any(phrase in text for phrase in ['return', 'back', 'come back']):
-                                    dates.append(('return', date_str))
-                                else:
-                                    dates.append(('departure', date_str))
-                        except:
-                            pass
-
         # Final return for return flight
         departure = next((d for l, d in dates if l == 'departure'), None)
         return_date = next((d for l, d in dates if l == 'return'), None)
         if departure or return_date:
             return departure, return_date
         else:
+            # FIXED: Fallback parsing with age filtering
             try:
                 cal = parsedatetime.Calendar()
                 time_struct, parse_status = cal.parse(normalized_text)
                 if parse_status >= 1:
                     departure_date = datetime(*time_struct[:6])
-                    return departure_date.strftime("%Y-%m-%d"), None
+                    # FIXED: Check if the date is reasonable (not far future due to age)
+                    if departure_date.year <= today.year + 2:
+                        return departure_date.strftime("%Y-%m-%d"), None
             except:
                 pass
             return None, None
 
     # ---- ONE-WAY FLIGHT HANDLING ---- #
     else:
+        # Check special dates first
         sorted_specials = sorted(special_date_map.keys(), key=len, reverse=True)
         for word in sorted_specials:
             if word in normalized_text:
                 return special_date_map[word]
 
+        # FIXED: Parse with age filtering
         try:
             cal = parsedatetime.Calendar()
             time_struct, parse_status = cal.parse(normalized_text)
             if parse_status >= 1:
                 parsed_date = datetime(*time_struct[:6])
-                return parsed_date.strftime("%Y-%m-%d")
+                # FIXED: Ensure the parsed date is reasonable (not affected by age mentions)
+                if parsed_date.year <= today.year + 2:
+                    return parsed_date.strftime("%Y-%m-%d")
         except:
             pass
 
