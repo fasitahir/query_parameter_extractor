@@ -1,13 +1,11 @@
 import json
 import requests
 from datetime import datetime
-from extract_parameters import extract_travel_info, extract_flight_class, extract_flight_type, extract_cities, extract_airline
+from extract_parameters import extract_travel_info
 import google.generativeai as genai
 from dotenv import load_dotenv
 import os
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
 # Load environment variables
 load_dotenv()
@@ -19,6 +17,7 @@ class ConversationalTravelAgent:
     def __init__(self):
         self.auth_url = "https://bookmesky.com/partner/api/auth/token"
         self.api_url = "https://bookmesky.com/air/api/search"
+        self.content_provider_api = "https://api.bookmesky.com/air/api/content-providers"
         self.username = os.getenv("BOOKME_SKY_USERNAME")
         self.password = os.getenv("BOOKME_SKY_PASSWORD")
         self.api_token = self.get_api_token()
@@ -29,14 +28,10 @@ class ConversationalTravelAgent:
             'Authorization': f'Bearer {self.api_token}'
         }
 
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-pro')
         
-        # Define popular airlines for multi-search
-        self.popular_airlines = [
-            "emirates", "qatar_airways", "etihad", "pia", "airblue", 
-            "serene_air", "turkish_airlines", "lufthansa", "british_airways",
-            "air_arabia", "flydubai", "saudia", "gulf_air"
-        ]
+        # Cache for content providers to avoid repeated API calls
+        self.content_providers_cache = {}
         
         # Conversation context
         self.conversation_history = []
@@ -68,6 +63,113 @@ class ConversationalTravelAgent:
         except Exception as e:
             print(f"🔥 Error fetching token: {str(e)}")
             raise
+
+    def get_content_providers(self, booking_info):
+        """Fetch available content providers for given locations and travel class"""
+        try:
+            # Create cache key from locations and travel class
+            source = booking_info.get('source', '')
+            destination = booking_info.get('destination', '')
+            travel_class = booking_info.get('flight_class', 'economy')
+            cache_key = f"{source}-{destination}-{travel_class}"
+            
+            # Check cache first
+            if cache_key in self.content_providers_cache:
+                print(f"🔍 Using cached content providers for {source} → {destination}")
+                return self.content_providers_cache[cache_key]
+            
+            # Build locations payload
+            locations = []
+            if source:
+                locations.append({"IATA": source, "Type": "airport"})
+            if destination:
+                locations.append({"IATA": destination, "Type": "airport"})
+            
+            if not locations:
+                print("❌ No locations provided for content provider search")
+                return []
+            
+            payload = {
+                "Locations": locations,
+                "TravelClass": travel_class
+            }
+            
+            print(f"🔍 Fetching content providers for {source} → {destination} in {travel_class} class...")
+            
+            response = requests.post(
+                self.content_provider_api,
+                headers=self.api_headers,
+                json=payload,
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract content provider names from response
+                content_providers = []
+                
+                print(f"🔍 Raw API response: {json.dumps(data, indent=2)[:500]}...")
+                
+                if isinstance(data, dict):
+                    # Handle different possible response structures
+                    providers_data = data.get('data', data.get('providers', data.get('contentProviders', data)))
+                    if isinstance(providers_data, list):
+                        for provider in providers_data:
+                            if isinstance(provider, dict):
+                                # Try different possible field names, prioritizing ContentProvider
+                                provider_name = provider.get('ContentProvider', provider.get('name', provider.get('code', provider.get('provider', provider.get('id')))))
+                                if provider_name and isinstance(provider_name, str):
+                                    content_providers.append(provider_name)
+                            elif isinstance(provider, str):
+                                content_providers.append(provider)
+                    elif isinstance(providers_data, dict):
+                        # If it's a dict, try to extract provider names from keys or values
+                        for key, value in providers_data.items():
+                            if isinstance(value, str):
+                                content_providers.append(value)
+                            elif isinstance(value, dict) and 'name' in value:
+                                name = value['name']
+                                if isinstance(name, str):
+                                    content_providers.append(name)
+                elif isinstance(data, list):
+                    # Handle case where data is directly a list
+                    for item in data:
+                        if isinstance(item, str):
+                            content_providers.append(item)
+                        elif isinstance(item, dict):
+                            # The API returns objects with ContentProvider field
+                            provider_name = item.get('ContentProvider', item.get('name', item.get('code', item.get('provider', item.get('id')))))
+                            if provider_name and isinstance(provider_name, str):
+                                content_providers.append(provider_name)
+                
+                # Ensure all items are strings
+                content_providers = [str(provider) for provider in content_providers if provider]
+                
+                # Cache the result
+                self.content_providers_cache[cache_key] = content_providers
+                
+                # Safe join for printing
+                provider_sample = [str(p) for p in content_providers[:5]]
+                print(f"✅ Found {len(content_providers)} content providers: {', '.join(provider_sample)}{'...' if len(content_providers) > 5 else ''}")
+                return content_providers
+                
+            else:
+                print(f"❌ Content provider API failed: {response.status_code} - {response.text[:200]}")
+                return []
+                
+        except Exception as e:
+            print(f"❌ Error fetching content providers: {str(e)}")
+            print(f"🔍 Error details: {type(e).__name__}")
+            if hasattr(e, '__traceback__'):
+                import traceback
+                print(f"🔍 Traceback: {traceback.format_exc()[-200:]}")
+            return []
+
+    def clear_content_providers_cache(self):
+        """Clear the content providers cache"""
+        self.content_providers_cache = {}
+        print("🔄 Content providers cache cleared")
 
     def add_to_conversation(self, message, sender="user"):
         """Add message to conversation history"""
@@ -154,7 +256,6 @@ class ConversationalTravelAgent:
         """Extract travel information with booking context"""
         # Create contextual query that includes current booking information
         contextual_query = self.create_contextual_query(user_input)
-        
         # Extract information from the contextual query
         extracted_info = extract_travel_info(contextual_query)
         
@@ -495,7 +596,7 @@ Keep it short and conversational:
             
             # Perform the search
             specific_airline = self.current_booking_info.get("content_provider")
-            search_results = self.search_flights_parallel(payload, specific_airline)
+            search_results = self.search_flights_parallel(payload, self.current_booking_info, specific_airline)
             
             # Process results
             if specific_airline:
@@ -602,6 +703,7 @@ Keep it conversational and informative:
         """Reset conversation state for new booking"""
         self.conversation_history = []
         self.current_booking_info = {}
+        self.content_providers_cache = {}  # Clear cache for new conversation
         
         welcome_msg = "Hello! I'm your travel assistant, and I'm excited to help you find the perfect flight! ✈️ Tell me about your travel plans - where would you like to go?"
         self.add_to_conversation(welcome_msg, "assistant")
@@ -704,14 +806,22 @@ Keep it conversational and informative:
                 "airline": airline_name or "All Airlines"
             }
     
-    def search_flights_parallel(self, payload, specific_airline=None):
-        """Search flights across multiple airlines in parallel or single airline"""
+    def search_flights_parallel(self, payload, booking_info, specific_airline=None):
+        """Search flights across available content providers or single airline"""
         
         if specific_airline:
             print(f"🔍 Searching flights for {specific_airline}...")
             return [self.search_single_airline(payload, specific_airline)]
         
-        print(f"🔍 Searching flights across {len(self.popular_airlines)} airlines...")
+        # Fetch available content providers for the route
+        content_providers = self.get_content_providers(booking_info)
+        
+        if not content_providers:
+            print("❌ No content providers found for this route. Using fallback search...")
+            # Fallback to search without specific provider
+            return [self.search_single_airline(payload, None)]
+        
+        print(f"🔍 Searching flights across {len(content_providers)} available providers...")
         
         results = []
         successful_searches = 0
@@ -719,30 +829,31 @@ Keep it conversational and informative:
         
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_airline = {
-                executor.submit(self.search_single_airline, payload, airline): airline 
-                for airline in self.popular_airlines
+                executor.submit(self.search_single_airline, payload, provider): provider 
+                for provider in content_providers
             }
             
             for future in as_completed(future_to_airline):
-                airline = future_to_airline[future]
+                provider = future_to_airline[future]
                 try:
                     result = future.result()
                     results.append(result)
                     
                     if "error" in result:
                         failed_searches += 1
-                        print(f"❌ {airline}: {result.get('error', 'Unknown error')}")
+                        print(f"❌ {provider}: {result.get('error', 'Unknown error')}")
                     else:
                         successful_searches += 1
-                        print(f"✅ {airline}: Search completed successfully")
+                        print(f"✅ {provider}: Search completed successfully")
                         
                 except Exception as e:
                     failed_searches += 1
-                    print(f"❌ {airline}: Exception occurred - {str(e)}")
+                    print(f"❌ {provider}: Exception occurred - {str(e)}")
                     results.append({
                         "error": f"Thread execution failed: {str(e)}",
-                        "airline": airline
+                        "airline": provider
                     })
+        
         
         print(f"📊 Search Summary: {successful_searches} successful API calls, {failed_searches} failed")
         return results

@@ -6,11 +6,12 @@ from autocorrect import Speller
 import re
 import json
 from typing import Dict
-from dotenv import load_dotenv
 import os
-import google.generativeai as genai
+from dotenv import load_dotenv
+from groq import Groq
 
 
+load_dotenv()  # Load environment variables from .env file
 # Load spaCy English model
 nlp = spacy.load("en_core_web_sm")
 spell = Speller(lang='en')
@@ -558,447 +559,503 @@ def extract_flight_class(query):
     # Default fallback - return economy
     return "economy"
 
+
+import json
 import re
 from typing import Dict
+from groq import Groq
 
 def extract_passenger_count(query: str) -> Dict[str, int]:
-    if not nlp:
-        return {"adults": 1, "children": 0, "infants": 0}
+    """
+    Extract passenger count using Groq's fast LLM models
+    
+    Args:
+        query (str): User query about flight booking
+        
+    Returns:
+        Dict containing passenger counts
+    """
+    
+    # Initialize Groq client
+    try:
+        client = Groq(
+            api_key=os.environ.get('GROQ_API_KEY')
+        )
+    except Exception as e:
+        # Fallback to default values if API fails
+        print(f"Error initializing Groq client: {e}")
+        return {
+            'adults': 1,
+            'children': 0,
+            'infants': 0
+        }
+    
+    # Create the prompt for passenger extraction
+    prompt = f"""
+Extract passenger counts from this travel query. Return ONLY a JSON object, no explanations.
 
-    query_lower = query.lower().replace("'", "'")  # normalize apostrophes
-    doc = nlp(query_lower)
+Query: "{query}"
 
+RULES:
+- Adults: 18+ years (speaker, wife, husband, parents, friends)
+- Children: 2-17 years (kids, son, daughter, child)  
+- Infants: 0-2 years (baby, infant, newborn)
+- "I with wife" = 2 adults total
+- "our 3 children" = 3 children
+- Age numbers override: "2 10yr olds" = 2 children
+- At least 1 adult if children/infants present
+
+EXAMPLES:
+Query: "I want to travel with my wife and our 3 children"
+{{"adults": 2, "children": 3, "infants": 0}}
+
+Query: "family of 4"  
+{{"adults": 2, "children": 2, "infants": 0}}
+
+Query: "2 adults and 1 baby"
+{{"adults": 2, "children": 0, "infants": 1}}
+
+Now extract from: "{query}"
+
+Return only JSON:
+"""
+
+    try:
+        # Use Groq's fastest model (llama3-8b-8192 or mixtral-8x7b-32768)
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            model="meta-llama/llama-4-scout-17b-16e-instruct",  # Fast and efficient model
+            temperature=0.1,  # Low temperature for consistent results
+            max_tokens=150,   # Limit response length
+            top_p=0.9
+        )
+        
+        response_text = chat_completion.choices[0].message.content.strip()
+        print(f"Groq raw response: {response_text}")
+        
+        # Extract and clean JSON
+        passenger_data = extract_and_clean_json(response_text)
+        
+        # Validate and sanitize the response
+        adults = max(0, int(passenger_data.get('adults', 0)))
+        children = max(0, int(passenger_data.get('children', 0)))
+        infants = max(0, int(passenger_data.get('infants', 0)))
+        
+        # Business logic validation
+        adults, children, infants = validate_passenger_counts(adults, children, infants)
+        
+        return {
+            'adults': adults,
+            'children': children,
+            'infants': infants
+        }
+
+    except Exception as e:
+        print(f"Error with Groq API: {e}")
+        return fallback_extraction(query)
+
+
+def extract_and_clean_json(response_text: str) -> dict:
+    """
+    Extract and clean JSON object from LLM response, handling extra text and malformed JSON
+    """
+    try:
+        # Step 1: Remove markdown code blocks
+        clean_text = re.sub(r'```(?:json)?\s*|\s*```', '', response_text, flags=re.IGNORECASE).strip()
+        
+        # Step 2: Extract ONLY the JSON object (ignore explanation text)
+        # Look for the first complete JSON object
+        json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+        json_match = re.search(json_pattern, clean_text, re.DOTALL)
+        
+        if not json_match:
+            # Fallback: try to find any JSON-like structure
+            json_match = re.search(r'\{.*?\}', clean_text, re.DOTALL)
+        
+        if not json_match:
+            raise ValueError("No JSON object found in response")
+        
+        json_str = json_match.group().strip()
+        
+        # Step 3: Clean and fix common JSON issues
+        json_str = json_str.replace("'", '"')  # Single to double quotes
+        
+        # Fix unquoted keys (but be careful not to quote already quoted keys)
+        json_str = re.sub(r'(?<!")(\b\w+)(?=\s*:)', r'"\1"', json_str)
+        
+        # Remove trailing commas
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+        
+        # Remove any trailing text after the closing brace
+        brace_count = 0
+        end_index = 0
+        for i, char in enumerate(json_str):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end_index = i + 1
+                    break
+        
+        if end_index > 0:
+            json_str = json_str[:end_index]
+        
+        # Step 4: Parse the cleaned JSON
+        return json.loads(json_str)
+        
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON parsing error: {e}")
+        print(f"🔍 Attempted to parse: {json_str}")
+        print(f"🔍 Full response: {response_text}")
+        raise
+    except Exception as e:
+        print(f"❌ JSON extraction failed: {e}")
+        print(f"🔍 Raw response: {response_text}")
+        raise
+
+
+def validate_passenger_counts(adults: int, children: int, infants: int) -> tuple:
+    """Apply business logic validation to passenger counts"""
+    
+    # Ensure at least 1 adult if children/infants present but no adults
+    if adults == 0 and (children > 0 or infants > 0):
+        adults = 1
+        print("⚠️  Added 1 adult to accompany children/infants")
+    
+    # Ensure at least 1 passenger total
+    if adults == 0 and children == 0 and infants == 0:
+        adults = 1
+        print("⚠️  Defaulted to 1 adult (no passengers specified)")
+    
+    return adults, children, infants
+
+
+def fallback_extraction(query: str) -> Dict[str, int]:
+    """
+    Enhanced fallback extraction using regex patterns
+    """
+    query_lower = query.lower()
     adults = 0
     children = 0
     infants = 0
-    processed_indices = set()
-    processed_plurals = set()
-
-    adult_keywords = {
-        'wife', 'husband', 'spouse', 'partner', 'mother', 'father', 'mom', 'dad',
-        'adult', 'passenger', 'traveler', 'people', 'person', 'friend', 'colleague', 
-        'brother', 'sister', 'uncle', 'aunt', 'cousin', 'grandmother', 'grandfather',
-        'grandma', 'grandpa', 'man', 'woman', 'guy', 'lady', 'gentleman', 'friends', 'adults'
-    }
     
-    child_keywords = {
-        'child', 'children', 'kid', 'kids', 'son', 'daughter', 'boy', 'girl', 
-        'minor', 'teen', 'teenager', 'youth'
-    }
+    print("🔄 Using fallback extraction...")
     
-    infant_keywords = {
-        'baby', 'babies', 'infant', 'infants', 'toddler', 'toddlers', 'newborn', 'newborns'
-    }
-
-    multi_adult_keywords = {
-        'parents': 2, 'couple': 2, 'couples': 2
-    }
-
-    number_words = {
-        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-        'a': 1, 'an': 1, 'few': 3, 'several': 4, 'many': 6
-    }
-
-    def extract_number(text):
-        return int(text) if text.isdigit() else number_words.get(text)
-
-    tokens = [token.text.lower() for token in doc]
-
-    # Step 0: Handle complex redistribution patterns first
-    redistribution_handled = False
-    
-    # Handle both numbered and unnumbered "children one of them is Y year old" patterns
-    # Check numbered patterns first (more specific)
-    numbered_patterns = [
-        r'(\d+)\s+(?:children|kids?).*?one\s+of\s+them\s+is\s+(\d+)\s+years?\s+old',
-        r'(\d+)\s+(?:children|kids?).*?one\s+is\s+(\d+)\s+years?\s+old',
-        r'with\s+my\s+(\d+)\s+(?:children|kids?).*?one\s+of\s+them\s+is\s+(\d+)\s+years?\s+old',
-        r'with\s+my\s+(\d+)\s+(?:children|kids?).*?one\s+is\s+(\d+)\s+years?\s+old'
+    # Step 1: Handle explicit numbers with passenger types
+    adult_patterns = [
+        r'(\d+)\s+adults?',
+        r'(\d+)\s+(?:people|persons?|passengers?)',
     ]
     
-    # Check numbered patterns first
-    for pattern in numbered_patterns:
-        matches = re.findall(pattern, query_lower)
-        if matches:  # Only process if we have matches
-            match = matches[0]  # Take only the first match
-            total_count, age = int(match[0]), int(match[1])
-            
-            # Start with the total count, then redistribute based on ages
-            remaining_children = total_count - 1  # Subtract the one with specific age
-            
-            # Categorize the first child by age
-            if age <= 2:
-                infants += 1
-            elif 2 < age < 18:
-                children += 1
-            else:
-                adults += 1
-            
-            # Handle "other is X year old" pattern for the remaining child
-            other_match = re.search(r'(?:and\s+)?(?:the\s+)?other\s+(?:one\s+)?is\s+(\d+)\s+years?\s+old', query_lower)
-            if other_match and remaining_children > 0:
-                other_age = int(other_match.group(1))
-                remaining_children -= 1
-                
-                if other_age <= 2:
-                    infants += 1
-                elif 2 < other_age < 18:
-                    children += 1
-                else:
-                    adults += 1
-            
-            # Add any remaining children to the children category
-            children += remaining_children
-            redistribution_handled = True
-            
-            # Mark relevant tokens as processed to avoid double counting
-            for i, token in enumerate(tokens):
-                if token == str(total_count) or token in ['children', 'kids', 'child', 'kid']:
-                    processed_indices.add(i)
-            break  # Exit after first successful pattern match
-    
-    # Only check unnumbered patterns if no numbered pattern matched
-    if not redistribution_handled:
-        unnumbered_patterns = [
-            r'(?:my\s+|with\s+my\s+)(?:children|kids?).*?one\s+of\s+them\s+is\s+(\d+)\s+years?\s+old',
-            r'(?:my\s+|with\s+my\s+)(?:children|kids?).*?one\s+is\s+(\d+)\s+years?\s+old'
-        ]
-        
-        for pattern in unnumbered_patterns:
-            matches = re.findall(pattern, query_lower)
-            if matches:  # Only process if we have matches
-                match = matches[0]  # Take only the first match
-                # For unnumbered "children", assume at least 2 (default for plural)
-                total_count = 2
-                age = int(match[0])
-                
-                # Start with the total count, then redistribute based on ages
-                remaining_children = total_count - 1  # Subtract the one with specific age
-                
-                # Categorize the first child by age
-                if age <= 2:
-                    infants += 1
-                elif 2 < age < 18:
-                    children += 1
-                else:
-                    adults += 1
-                
-                # Handle "other is X year old" pattern for the remaining child
-                other_match = re.search(r'(?:and\s+)?(?:the\s+)?other\s+(?:one\s+)?is\s+(\d+)\s+years?\s+old', query_lower)
-                if other_match and remaining_children > 0:
-                    other_age = int(other_match.group(1))
-                    remaining_children -= 1
-                    
-                    if other_age <= 2:
-                        infants += 1
-                    elif 2 < other_age < 18:
-                        children += 1
-                    else:
-                        adults += 1
-                
-                # Add any remaining children to the children category
-                children += remaining_children
-                redistribution_handled = True
-                
-                # Mark relevant tokens as processed to avoid double counting
-                for i, token in enumerate(tokens):
-                    if token in ['children', 'kids', 'child', 'kid']:
-                        processed_indices.add(i)
-                break  # Exit after first successful pattern match
-
-    # Handle direct age specifications like "my 1 year old" or "my child who is 1 year old"
-    if not redistribution_handled:
-        for i, token in enumerate(tokens):
-            if i in processed_indices:
-                continue
-                
-            # Look for patterns like "X year old <category>" or "my child who is X year old"
-            if token.isdigit() and i+2 < len(tokens):
-                if tokens[i+1] in ["year", "years"] and tokens[i+2] == "old":
-                    age = int(tokens[i])
-                    
-                    # Look for category before or after the age
-                    category = None
-                    if i > 0 and tokens[i-1] in (child_keywords | infant_keywords | adult_keywords):
-                        category = tokens[i-1]
-                    elif i+3 < len(tokens) and tokens[i+3] in (child_keywords | infant_keywords | adult_keywords):
-                        category = tokens[i+3]
-                    elif i > 1 and tokens[i-2] in (child_keywords | infant_keywords | adult_keywords):
-                        category = tokens[i-2]
-                    
-                    # Special handling for "my child who is X year old"
-                    if not category:
-                        # Look for "child who is" pattern
-                        for j in range(max(0, i-5), i):
-                            if tokens[j] in child_keywords and j+2 < len(tokens) and tokens[j+2] == 'is':
-                                category = tokens[j]
-                                break
-                    
-                    if category or not category:  # Process age even without explicit category
-                        if age <= 2:
-                            infants += 1
-                        elif 2 < age < 18:
-                            children += 1
-                        else:
-                            adults += 1
-                        processed_indices.update([i, i+1, i+2])
-                        if category:
-                            for k, t in enumerate(tokens):
-                                if t == category:
-                                    processed_indices.add(k)
-                                    break
-
-    # Step 1: Special patterns like "family of 5" (FIXED)
-    special_patterns = {
-        'group of': 'adults',
-        'party of': 'adults',
-    }
-
-    family_or_group_found = False
-
-    # Handle "family of X" specially - check what X refers to
-    if 'family of' in query_lower:
-        try:
-            start_idx = query_lower.index('family of')
-            after_pattern = query_lower[start_idx + len('family of'):].strip()
-            words_after = after_pattern.split()
-            if words_after:
-                num = extract_number(words_after[0])
-                if num:
-                    # Check if the number is followed by a specific category
-                    if len(words_after) > 1:
-                        category = words_after[1]
-                        if category in child_keywords:
-                            # "family of 2 children" - don't set total family size
-                            pass  # Let other steps handle the children count
-                        elif category in adult_keywords:
-                            # "family of 3 adults" - set adults count
-                            adults = max(adults, num)
-                        else:
-                            # "family of 5" (no specific category) - assume total family size
-                            adults = num
-                            family_or_group_found = True
-                    else:
-                        # "family of 5" (no specific category) - assume total family size
-                        adults = num
-                        family_or_group_found = True
-        except:
-            pass
-
-    # Handle other special patterns
-    for pattern, type_hint in special_patterns.items():
-        if pattern in query_lower:
-            try:
-                start_idx = query_lower.index(pattern)
-                after_pattern = query_lower[start_idx + len(pattern):].strip()
-                words_after = after_pattern.split()
-                if words_after:
-                    num = extract_number(words_after[0])
-                    if num:
-                        if type_hint == 'adults':
-                            adults = max(adults, num)
-            except:
-                pass
-
-    # Step 2: Handle number + category (Fixed to properly process all numbers)
-    if not redistribution_handled:
-        i = 0
-        while i < len(tokens):
-            if i in processed_indices:
-                i += 1
-                continue
-
-            num = extract_number(tokens[i])
-            if num is not None:
-                for j in range(i + 1, min(i + 4, len(tokens))):
-                    word = tokens[j]
-                    if word in infant_keywords:
-                        infants += num
-                        processed_indices.add(j)
-                        break
-                    elif word in child_keywords:
-                        children += num
-                        processed_indices.add(j)
-                        break
-                    elif word in adult_keywords:
-                        adults += num
-                        processed_indices.add(j)
-                        break
-                    elif word in multi_adult_keywords:
-                        adults += num * multi_adult_keywords[word]
-                        processed_indices.add(j)
-                        break
-                processed_indices.add(i)
-            i += 1
-
-    # Step 3: Count individual mentions (skip if we have redistribution patterns)
-    if not redistribution_handled:
-        for i, token in enumerate(tokens):
-            if i in processed_indices:
-                continue
-            if token in multi_adult_keywords:
-                adults += multi_adult_keywords[token]
-                processed_indices.add(i)
-            elif token in adult_keywords:
-                adults += 1
-                processed_indices.add(i)
-            elif token in child_keywords:
-                children += 1
-                processed_indices.add(i)
-            elif token in infant_keywords:
-                infants += 1
-                processed_indices.add(i)
-
-    # Step 4: Plural words with default counts (Fixed logic)
-    plural_defaults = {
-        'babies': 2, 'infants': 2, 'toddlers': 2,  # Fixed: babies should default to 2
-        'kids': 2, 'children': 2, 'friends': 2,
-        'people': 3, 'adults': 2
-    }
-
-    for plural, default_count in plural_defaults.items():
-        plural_indices = [i for i, t in enumerate(tokens) if t == plural]
-        for plural_idx in plural_indices:
-            if plural in processed_plurals:
-                continue
-            has_number_before = any(
-                tokens[j].isdigit() or tokens[j] in number_words
-                for j in range(max(0, plural_idx - 2), plural_idx)
-            )
-            if not has_number_before and not redistribution_handled:  # Don't apply defaults if we have redistribution
-                if plural in infant_keywords:
-                    infants = max(infants, default_count)
-                elif plural in child_keywords:
-                    children = max(children, default_count)
-                else:
-                    adults = max(adults, default_count)
-                processed_plurals.add(plural)
-
-    # Step 5: Named Entities (PERSON)
-    for ent in doc.ents:
-        if ent.label_ == "PERSON":
-            adults += 1
-
-    # Step 6: Speaker inclusion (FIXED LOGIC)
-    pronouns = {'i', 'me', 'myself'}
-    has_first_person = any(p in tokens for p in pronouns)
-    has_with = 'with' in tokens or 'and' in tokens
-    speaker_should_be_counted = False
-
-    if has_first_person:
-        # More comprehensive speaker detection patterns
-        speaker_patterns = [
-            "i want to travel with", "i'm traveling with", "i am traveling with", 
-            "i will travel with", "i will go with", "book a flight for me and",
-            "traveling with", "with my", "me and my", "i want to travel",
-            "i need to book", "book for me and", "i have to travel with"
-        ]
-        
-        for pattern in speaker_patterns:
-            if pattern in query_lower:
-                speaker_should_be_counted = True
-                break
-        
-        # If speaker mentions traveling with others, they should be counted
-        if has_with and has_first_person and (adults > 0 or children > 0 or infants > 0):
-            speaker_should_be_counted = True
-        
-        # Special case: when first person is present with family members
-        family_indicators = ['wife', 'husband', 'kids', 'children', 'baby', 'babies', 'child']
-        if has_first_person and any(word in tokens for word in family_indicators):
-            speaker_should_be_counted = True
-
-        # Don't double-count if "family of X" already includes the speaker
-        if speaker_should_be_counted and not family_or_group_found:
-            adults += 1
-    
-    # Handle cases where speaker is implied but not explicitly mentioned
-    # e.g., "with my 1 year old" implies the speaker is traveling
-    if has_with and not has_first_person and (children > 0 or infants > 0 or any(word in tokens for word in ['my', 'wife', 'husband'])):
-        adults = max(adults, 1)  # At least one adult must be traveling
-    
-    # Handle "Traveling with X children" case - implies speaker is traveling
-    if 'traveling with' in query_lower and not has_first_person:
-        if children > 0 or infants > 0:
-            adults = max(adults, 1)  # At least one adult must be traveling with children
-
-    # Step 7: Handle "we" and "us"
-    if 'we' in tokens and adults < 2:
-        adults = max(adults, 2)
-    if 'us' in tokens and adults < 2 and children == 0 and infants == 0:
-        adults = 2
-
-    # Step 8: Negatives like "no kids"
-    negative_patterns = [
-        'no kids', 'no children', 'no baby', 'no babies', 'no infants',
-        'without kids', 'without children', 'without baby'
+    child_patterns = [
+        r'(\d+)\s+(?:children?|kids?|child)',
+        r'our\s+(\d+)\s+children',
     ]
-    for pattern in negative_patterns:
-        if pattern in query_lower:
-            if 'kid' in pattern or 'child' in pattern:
-                children = 0
-            elif 'baby' in pattern or 'infant' in pattern:
-                infants = 0
-
-    # Step 9: Compound patterns (Enhanced)
-    compound_patterns = {
-        'me and my': 2,
-        'my wife and i': 2,
-        'my husband and i': 2,
-        'with my brother and sister': 3,
-        'with two friends': 3,
-        'book a flight for me and my parents': 3,
-        'with my parents': 3,
-        'two couples and': 4  # For "Two couples and 4 kids"
-    }
-    for pattern, count in compound_patterns.items():
-        if pattern in query_lower:
-            adults = max(adults, count)
     
-    # FIX: Handle "travel with my wife" case specifically
-    if 'travel with my wife' in query_lower or 'travel with my husband' in query_lower:
+    infant_patterns = [
+        r'(\d+)\s+(?:infants?|babies|baby|newborns?)',
+        r'(\d+)\s+(?:month|months?)\s+(?:old|baby)',
+    ]
+    
+    # Extract explicit counts
+    for pattern in adult_patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            adults = max(adults, int(match.group(1)))
+    
+    for pattern in child_patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            children = max(children, int(match.group(1)))
+    
+    for pattern in infant_patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            infants = max(infants, int(match.group(1)))
+    
+    # Step 2: Handle relationship-based counts
+    if re.search(r'with\s+(?:my\s+)?(?:wife|husband|partner)', query_lower):
         adults = max(adults, 2)  # Speaker + spouse
-
-    # Step 10: "few people" - Fixed to return 3 not 4
-    if 'few people' in query_lower or 'a few people' in query_lower:
-        adults = 3  # Use exact value, not max
-    elif 'several' in tokens:
-        adults = max(adults, 4)  # Keep several as 4
-
-    # Step 11: Final validation and cleanup
     
+    # Step 3: Handle family counts
+    family_match = re.search(r'family of (\d+)', query_lower)
+    if family_match:
+        total = int(family_match.group(1))
+        if adults == 0 and children == 0:  # If no specific counts found
+            adults = min(2, total)  # Assume max 2 adults
+            children = max(0, total - adults)
+    
+    # Step 4: Handle age-specific mentions
+    age_matches = re.findall(r'(\d+)?\s*(\d+)\s*(?:yr|year)s?\s+old', query_lower)
+    for count_str, age_str in age_matches:
+        try:
+            count = int(count_str) if count_str else 1
+            age = int(age_str)
+            
+            if 0 <= age <= 2:
+                infants += count
+            elif 3 <= age <= 17:
+                children += count
+            else:
+                adults += count
+        except ValueError:
+            continue
+    
+    # Step 5: Handle month-based age for infants
+    month_matches = re.findall(r'(?:one|1|\d+)\s+(?:\d+\s+)?months?\s+(?:old|baby)', query_lower)
+    if month_matches:
+        infants += len(month_matches)
+    
+    # Step 6: Handle special phrases
+    if 'few people' in query_lower:
+        adults = max(adults, 3)
+    elif 'several people' in query_lower:
+        adults = max(adults, 4)
+    
+    # Step 7: Apply validation
+    adults, children, infants = validate_passenger_counts(adults, children, infants)
+    
+    print(f"🔧 Fallback result: {adults} adults, {children} children, {infants} infants")
+    return {
+        'adults': adults,
+        'children': children,
+        'infants': infants
+    }
+
+
+# Alternative function using Groq's Mixtral model for complex cases
+def extract_passenger_count_mixtral(query: str) -> Dict[str, int]:
+    """
+    Use Mixtral model for more complex passenger extraction
+    """
+    try:
+        client = Groq(api_key="your_groq_api_key_here")
+        
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert at extracting passenger information from travel queries. Always return valid JSON with adults, children, and infants counts."
+                },
+                {
+                    "role": "user",
+                    "content": f"""
+Extract passenger counts from: "{query}"
+
+Rules:
+- Adults: 18+ years
+- Children: 2-17 years  
+- Infants: 0-2 years
+- Age numbers override categories
+- "fam of 2 10 yr olds" = 2 children, not adults
+- Include speaker in count when mentioned
+
+Return JSON: {{"adults": X, "children": Y, "infants": Z}}
+"""
+                }
+            ],
+            model="mixtral-8x7b-32768",  # More capable model
+            temperature=0,
+            max_tokens=100
+        )
+        
+        response_text = chat_completion.choices[0].message.content.strip()
+        passenger_data = extract_and_clean_json(response_text)
+        
+        adults = max(0, int(passenger_data.get('adults', 0)))
+        children = max(0, int(passenger_data.get('children', 0)))
+        infants = max(0, int(passenger_data.get('infants', 0)))
+        
+        adults, children, infants = validate_passenger_counts(adults, children, infants)
+        
+        return {
+            'adults': adults,
+            'children': children,
+            'infants': infants
+        }
+        
+    except Exception as e:
+        print(f"Mixtral extraction failed: {e}")
+        return fallback_extraction(query)
+
+
+def validate_passenger_counts(adults: int, children: int, infants: int) -> tuple:
+    """Apply business logic validation to passenger counts"""
+    
+    # Ensure at least 1 adult if children/infants present but no adults
+    if adults == 0 and (children > 0 or infants > 0):
+        adults = 1
+        print("⚠️  Added 1 adult to accompany children/infants")
+    
+    # Ensure at least 1 passenger total
     if adults == 0 and children == 0 and infants == 0:
         adults = 1
+        print("⚠️  Defaulted to 1 adult (no passengers specified)")
     
-    # Special case for "3 adults, 2 children, 1 infant"
-    if "adults" in query_lower and "children" in query_lower and "infant" in query_lower:
-        # Find numbers before each category
-        for i, token in enumerate(tokens):
-            if token == "adults" and i > 0 and extract_number(tokens[i-1]):
-                adults = extract_number(tokens[i-1])
-            elif token == "children" and i > 0 and extract_number(tokens[i-1]):
-                children = extract_number(tokens[i-1])
-            elif ("infant" in token or "infants" in token) and i > 0 and extract_number(tokens[i-1]):
-                infants = extract_number(tokens[i-1])
+    return adults, children, infants
 
-    return {
-        "adults": max(0, adults),
-        "children": max(0, children),
-        "infants": max(0, infants)
+
+def fallback_extraction(query: str) -> Dict[str, int]:
+    """
+    Enhanced fallback extraction using regex patterns
+    """
+    query_lower = query.lower()
+    adults = 0
+    children = 0
+    infants = 0
+    
+    print("🔄 Using fallback extraction...")
+    
+    # Enhanced regex patterns
+    patterns = {
+        'adults': [
+            r'(\d+)\s+adults?',
+            r'(\d+)\s+(?:people|persons?)',
+            r'with\s+(?:my\s+)?(?:wife|husband|partner)',  # +1 for speaker +1 for partner
+        ],
+        'children': [
+            r'(\d+)\s+(?:children?|kids?|child)',
+            r'(\d+)\s+(?:\d+\s*(?:yr|year|month)s?\s+old)',  # Age-based
+            r'(\d+)\s+(?:10|11|12|13|14|15|16|17)\s*(?:yr|year)',
+        ],
+        'infants': [
+            r'(\d+)\s+(?:infants?|babies|baby|newborns?)',
+            r'(\d+)\s+(?:\d+\s*months?\s+old)',
+            r'(\d+)\s+(?:0|1|2)\s*(?:yr|year)',
+        ]
     }
+    
+    # Extract using patterns
+    for category, pattern_list in patterns.items():
+        for pattern in pattern_list:
+            matches = re.findall(pattern, query_lower)
+            if matches:
+                if category == 'adults':
+                    adults = max(adults, int(matches[0]))
+                elif category == 'children':
+                    children = max(children, int(matches[0]))
+                elif category == 'infants':
+                    infants = max(infants, int(matches[0]))
+    
+    # Handle special cases
+    if 'with wife' in query_lower or 'with husband' in query_lower:
+        adults = max(adults, 2)  # Speaker + spouse
+    
+    if 'family of' in query_lower:
+        family_match = re.search(r'family of (\d+)', query_lower)
+        if family_match:
+            total = int(family_match.group(1))
+            if adults == 0:  # If no adults specified yet
+                adults = min(2, total)  # Assume 2 adults max
+                children = max(0, total - adults)
+    
+    # Age-specific extraction for the problematic case
+    age_matches = re.findall(r'(\d+)\s+(\d+)\s*(?:yr|year)s?\s+old', query_lower)
+    for count, age in age_matches:
+        count = int(count)
+        age = int(age)
+        if 0 <= age <= 2:
+            infants += count
+        elif 3 <= age <= 17:
+            children += count
+        else:
+            adults += count
+    
+    # Month-based age for infants
+    month_matches = re.findall(r'(\d+)\s*months?\s+(?:old|baby)', query_lower)
+    for match in month_matches:
+        if 'one' in query_lower or '1' in match:
+            infants += 1
+    
+    # Apply validation
+    adults, children, infants = validate_passenger_counts(adults, children, infants)
+    
+    print(f"🔧 Fallback result: {adults} adults, {children} children, {infants} infants")
+    return {
+        'adults': adults,
+        'children': children,
+        'infants': infants
+    }
+
+
+# Alternative function using Groq's Mixtral model for complex cases
+def extract_passenger_count_mixtral(query: str) -> Dict[str, int]:
+    """
+    Use Mixtral model for more complex passenger extraction
+    """
+    try:
+        client = Groq(api_key="your_groq_api_key_here")
+        
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert at extracting passenger information from travel queries. Always return valid JSON with adults, children, and infants counts."
+                },
+                {
+                    "role": "user",
+                    "content": f"""
+Extract passenger counts from: "{query}"
+
+Rules:
+- Adults: 18+ years
+- Children: 2-17 years  
+- Infants: 0-2 years
+- Age numbers override categories
+- "fam of 2 10 yr olds" = 2 children, not adults
+- Include speaker in count when mentioned
+
+Return JSON: {{"adults": X, "children": Y, "infants": Z}}
+"""
+                }
+            ],
+            model="mixtral-8x7b-32768",  # More capable model
+            temperature=0,
+            max_tokens=100
+        )
+        
+        response_text = chat_completion.choices[0].message.content.strip()
+        passenger_data = extract_and_clean_json(response_text)
+        
+        adults = max(0, int(passenger_data.get('adults', 0)))
+        children = max(0, int(passenger_data.get('children', 0)))
+        infants = max(0, int(passenger_data.get('infants', 0)))
+        
+        adults, children, infants = validate_passenger_counts(adults, children, infants)
+        
+        return {
+            'adults': adults,
+            'children': children,
+            'infants': infants
+        }
+        
+    except Exception as e:
+        print(f"Mixtral extraction failed: {e}")
+        return fallback_extraction(query)
+
 
 def extract_dates(text, flight_type=None):
     """
     FIXED: Date extraction function that properly handles age mentions
     """
     original_text = text.lower()
+    original_text = correct_spelling(original_text)
     today = datetime.now()
 
     # FIXED: Remove age mentions before parsing dates to prevent confusion
     # Remove patterns like "10 year old", "1 year old", etc.
     text_cleaned = re.sub(r'\b\d+\s+years?\s+old\b', '', original_text)
     text_cleaned = re.sub(r'\b\d+\s+year\s+old\b', '', text_cleaned)
+    
+    # ADDED: Remove month age mentions like "15 month", "18 months old", etc.
+    text_cleaned = re.sub(r'\b\d+\s+months?\s+(?:old)?\b', '', text_cleaned)
+    text_cleaned = re.sub(r'\b\d+\s+month\s+(?:old)?\b', '', text_cleaned)
     
     # Special date mapping
     special_date_map = {
@@ -1054,7 +1111,7 @@ def extract_dates(text, flight_type=None):
             for match in matches:
                 if len(match) == 2:
                     # Skip if this looks like an age pattern
-                    if any(re.search(r'\d+.*?(year|old)', m) for m in match):
+                    if any(re.search(r'\d+.*?(year|old|month)', m) for m in match):
                         continue
                         
                     for label, date_str in zip(['departure', 'return'], match):
@@ -1096,7 +1153,7 @@ def extract_dates(text, flight_type=None):
                 matches = re.findall(pattern, normalized_text)
                 for match in matches:
                     # Skip age-related matches
-                    if re.search(r'\d+.*?(year|old)', match):
+                    if re.search(r'\d+.*?(year|old|month)', match):
                         continue
                         
                     date_str = re.sub(r'\b(of|the)\b', '', match.strip().lower())
@@ -1152,6 +1209,31 @@ def extract_dates(text, flight_type=None):
             if word in normalized_text:
                 return special_date_map[word]
 
+        # FIXED: Parse with age filtering - also look for relative date patterns
+        relative_date_patterns = [
+            r'\bnext\s+(\w+day)\b',  # next thursday, next monday, etc.
+            r'\bthis\s+(\w+day)\b',  # this friday, this saturday, etc.
+            r'\b(\w+day)\s+next\b',  # thursday next, friday next, etc.
+        ]
+        
+        for pattern in relative_date_patterns:
+            matches = re.findall(pattern, normalized_text)
+            for match in matches:
+                try:
+                    cal = parsedatetime.Calendar()
+                    if isinstance(match, tuple):
+                        date_phrase = ' '.join(match)
+                    else:
+                        date_phrase = f"next {match}" if pattern.startswith(r'\b(\w+day)') else f"next {match}"
+                    
+                    time_struct, parse_status = cal.parse(date_phrase)
+                    if parse_status >= 1:
+                        parsed_date = datetime(*time_struct[:6])
+                        if parsed_date.year <= today.year + 2:
+                            return parsed_date.strftime("%Y-%m-%d")
+                except:
+                    pass
+
         # FIXED: Parse with age filtering
         try:
             cal = parsedatetime.Calendar()
@@ -1165,146 +1247,6 @@ def extract_dates(text, flight_type=None):
             pass
 
         return None
-
-def extract_airline(query):
-    """
-    Extract airline name from query with multiple strategies.
-    Returns standardized airline code or None if not found.
-    """
-    query_lower = query.lower().strip()
-    
-    # Add common city/location names to exclude from airline matching
-    excluded_locations = {
-        'lahore', 'karachi', 'islamabad', 'peshawar', 'quetta', 'multan',
-        'dubai', 'london', 'paris', 'new york', 'tokyo', 'singapore',
-        'mumbai', 'delhi', 'bangkok', 'kuala lumpur', 'doha', 'riyadh'
-        # Add more cities as needed
-    }
-
-    # Strategy 1: Direct keyword match (improved)
-    sorted_keywords = sorted(all_airline_keywords, key=lambda x: len(x[0]), reverse=True)
-    for keyword, airline_code in sorted_keywords:
-        # Ensure we're not matching city names
-        if keyword.lower() in excluded_locations:
-            continue
-            
-        pattern = r'\b' + re.escape(keyword) + r'\b'
-        if re.search(pattern, query_lower):
-            return airline_code
-
-    # Strategy 2: Pattern-based extraction (fixed)
-    airline_patterns = [
-        r'(?:fly|travel|book|reserve)\s+(?:with|on|via)\s+([a-zA-Z\s-]+?)(?:\s+(?:flight|ticket|airlines?|airways?)|$)',
-        r'([a-zA-Z\s-]+?)\s+(?:flight|ticket|airlines?|airways?)(?:\s|$|,|\.)',
-        r'(?:on|via|through)\s+([a-zA-Z\s-]+?)(?:\s+(?:flight|ticket|airlines?|airways?)|$)',
-        r'(?:prefer|want|need|like)\s+([a-zA-Z\s-]+?)(?:\s+(?:airline|airways?)|$)',
-        r'\b([A-Z]{2,3})\s*\d{2,4}\b',  # Flight codes
-    ]
-    
-    for pattern in airline_patterns:
-        matches = re.findall(pattern, query_lower, re.IGNORECASE)
-        for match in matches:
-            extracted_text = match.strip().lower()
-            if len(extracted_text) < 2:
-                continue
-                
-            # Skip if it's a known location
-            if extracted_text in excluded_locations:
-                continue
-                
-            # Only proceed if the extracted text contains airline-related keywords
-            airline_indicators = ['airline', 'airways', 'air', 'flight', 'jet']
-            if not any(indicator in extracted_text for indicator in airline_indicators):
-                continue
-                
-            for keyword, airline_code in sorted_keywords:
-                if keyword.lower() in excluded_locations:
-                    continue
-                if extracted_text == keyword or keyword in extracted_text:
-                    return airline_code
-
-    # Strategy 3: NLP-based context extraction (improved)
-    try:
-        doc = nlp(query_lower)
-        airline_indicators = {"airlines", "airways", "air", "airline", "flight", "carrier"}
-
-        for ent in doc.ents:
-            if ent.label_ in {"ORG", "PERSON", "GPE"}:
-                ent_text = ent.text.lower()
-                
-                # Skip known locations
-                if ent_text in excluded_locations:
-                    continue
-                    
-                for keyword, airline_code in sorted_keywords:
-                    if keyword.lower() in excluded_locations:
-                        continue
-                    if keyword == ent_text or keyword in ent_text:
-                        return airline_code
-
-        # Check token context only if an airline indicator exists in the sentence
-        if any(word in query_lower for word in airline_indicators):
-            for token in doc:
-                if token.pos_ == "PROPN" and token.text.lower() not in excluded_locations:
-                    start_idx = max(0, token.i - 2)
-                    end_idx = min(len(doc), token.i + 3)
-                    context_tokens = [t.text.lower() for t in doc[start_idx:end_idx]]
-                    context_text = " ".join(context_tokens)
-
-                    for keyword, airline_code in sorted_keywords:
-                        if keyword.lower() in excluded_locations:
-                            continue
-                        if keyword in context_text:
-                            return airline_code
-    except Exception as e:
-        print(f"[DEBUG] NLP strategy failed: {e}")
-
-    # Strategy 4: Fuzzy matching (improved)
-    try:
-        doc = nlp(query_lower)
-        airline_related_words = []
-
-        for token in doc:
-            if (token.pos_ in ["NOUN", "PROPN"] and 
-                len(token.text) > 3 and 
-                not token.is_stop and 
-                not token.like_num and
-                token.text.lower() not in excluded_locations):
-                
-                excluded_words = {"flight", "ticket", "booking", "travel", "trip", 
-                                "journey", "airport", "departure", "arrival", 
-                                "passenger", "seat", "lahore", "karachi"}
-                
-                if token.text.lower() not in excluded_words:
-                    airline_related_words.append(token.text.lower())
-
-        for i in range(len(doc) - 1):
-            if (doc[i].pos_ in ["NOUN", "PROPN"] and doc[i+1].pos_ in ["NOUN", "PROPN", "ADJ"]):
-                phrase = f"{doc[i].text} {doc[i+1].text}".lower()
-                if (len(phrase) > 6 and 
-                    not any(loc in phrase for loc in excluded_locations)):
-                    airline_related_words.append(phrase)
-
-        # Only proceed with fuzzy matching if we have airline indicators in the query
-        airline_indicators = ['airline', 'airways', 'air', 'flight', 'jet', 'carrier']
-        if any(indicator in query_lower for indicator in airline_indicators):
-            all_keywords = [keyword for keyword, _ in sorted_keywords 
-                          if keyword.lower() not in excluded_locations]
-            
-            for word in airline_related_words:
-                result = process.extractOne(word, all_keywords)
-                if result:
-                    best_match, score, _ = result
-                    if score > 95:  # Keep high threshold to avoid false positives
-                        for keyword, airline_code in sorted_keywords:
-                            if keyword == best_match:
-                                print(f"[DEBUG] Matched via fuzzy: '{word}' → '{best_match}' (score: {score}) → {airline_code}")
-                                return airline_code
-
-    except Exception as e:
-        print(f"[DEBUG] Fuzzy matching failed: {e}")
-
-    return None
 
 
 # Additional helper function to validate airline extraction
@@ -1338,20 +1280,6 @@ def validate_airline_extraction(query, extracted_airline):
         
     return True
 
-
-# Modified main extraction function with validation
-def extract_airline_safe(query):
-    """
-    Safe airline extraction with validation to prevent false positives.
-    """
-    extracted = extract_airline(query)
-    
-    if validate_airline_extraction(query, extracted):
-        return extracted
-    else:
-        print(f"[DEBUG] Rejected airline extraction '{extracted}' as likely false positive")
-        return None
-    
 
 def extract_travel_info(query):
     """
@@ -1389,13 +1317,6 @@ def extract_travel_info(query):
     flight_class = extract_flight_class(query)
     result["flight_class"] = flight_class
     
-    # Extract airline (ContentProvider)
-    airline = extract_airline(query)
-    if airline:
-        result["content_provider"] = airline
-    else:
-        result["content_provider"] = None
-    
     # Extract dates based on flight type
     if flight_type == "return":
         departure_date, return_date = extract_dates(query, flight_type)
@@ -1427,6 +1348,7 @@ def extract_travel_info(query):
         # Fallback to default
         result["passengers"] = {"adults": 1, "children": 0, "infants": 0}
         result["total_passengers"] = 1
+    print("debug", result)
     return result
 
 # Enhanced command-line interface
