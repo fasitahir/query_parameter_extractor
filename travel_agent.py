@@ -2,16 +2,13 @@ import json
 import requests
 from datetime import datetime
 from extract_parameters import extract_travel_info
-import google.generativeai as genai
+from groq import Groq
 from dotenv import load_dotenv
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables
 load_dotenv()
-
-# Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 class ConversationalTravelAgent:
     def __init__(self):
@@ -28,7 +25,14 @@ class ConversationalTravelAgent:
             'Authorization': f'Bearer {self.api_token}'
         }
 
-        self.model = genai.GenerativeModel('gemini-2.5-pro')
+        # Initialize Groq client
+        try:
+            self.groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+            self.model_name = "meta-llama/llama-4-scout-17b-16e-instruct"
+        except Exception as e:
+            print(f"Warning: Failed to initialize Groq client: {e}")
+            self.groq_client = None
+            self.model_name = None
         
         # Cache for content providers to avoid repeated API calls
         self.content_providers_cache = {}
@@ -108,9 +112,7 @@ class ConversationalTravelAgent:
                 
                 # Extract content provider names from response
                 content_providers = []
-                
-                print(f"🔍 Raw API response: {json.dumps(data, indent=2)[:500]}...")
-                
+                                
                 if isinstance(data, dict):
                     # Handle different possible response structures
                     providers_data = data.get('data', data.get('providers', data.get('contentProviders', data)))
@@ -151,11 +153,9 @@ class ConversationalTravelAgent:
                 
                 # Safe join for printing
                 provider_sample = [str(p) for p in content_providers[:5]]
-                print(f"✅ Found {len(content_providers)} content providers: {', '.join(provider_sample)}{'...' if len(content_providers) > 5 else ''}")
                 return content_providers
                 
             else:
-                print(f"❌ Content provider API failed: {response.status_code} - {response.text[:200]}")
                 return []
                 
         except Exception as e:
@@ -349,8 +349,24 @@ Rules:
 Respond naturally:
 """
             
-            response = self.model.generate_content(prompt)
-            return response.text
+            # Use Groq instead of Gemini
+            if self.groq_client and self.model_name:
+                chat_completion = self.groq_client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    model=self.model_name,
+                    temperature=0.7,  # Slightly more creative for conversational responses
+                    max_tokens=500,   # Reasonable limit for conversation
+                    top_p=0.9
+                )
+                return chat_completion.choices[0].message.content.strip()
+            else:
+                # Fallback if Groq is not available
+                raise Exception("Groq client not initialized")
             
         except Exception as e:
             print(f"LLM generation failed: {e}")
@@ -553,8 +569,24 @@ The message should:
 Keep it short and conversational:
 """
             
-            response = self.model.generate_content(prompt)
-            return response.text
+            # Use Groq instead of Gemini
+            if self.groq_client and self.model_name:
+                chat_completion = self.groq_client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    model=self.model_name,
+                    temperature=0.6,  # Slightly creative but consistent
+                    max_tokens=300,   # Shorter responses for confirmations
+                    top_p=0.9
+                )
+                return chat_completion.choices[0].message.content.strip()
+            else:
+                # Fallback if Groq is not available
+                raise Exception("Groq client not initialized")
             
         except Exception as e:
             # Fallback to simple confirmation
@@ -647,8 +679,24 @@ Examples: "Excellent! Let me search for the best flights for you now!" or "Perfe
 Generate message:
 """
             
-            response = self.model.generate_content(prompt)
-            return response.text.strip()
+            # Use Groq instead of Gemini
+            if self.groq_client and self.model_name:
+                chat_completion = self.groq_client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    model=self.model_name,
+                    temperature=0.5,  # Moderate creativity for enthusiasm
+                    max_tokens=100,   # Very short messages
+                    top_p=0.9
+                )
+                return chat_completion.choices[0].message.content.strip()
+            else:
+                # Fallback if Groq is not available
+                raise Exception("Groq client not initialized")
             
         except Exception as e:
             return "Excellent! Let me search for the best flight options for you now!"
@@ -688,8 +736,24 @@ Generate a conversational, helpful response that:
 Keep it conversational and informative:
 """
             
-            response = self.model.generate_content(prompt)
-            llm_response = response.text
+            # Use Groq instead of Gemini
+            if self.groq_client and self.model_name:
+                chat_completion = self.groq_client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    model=self.model_name,
+                    temperature=0.6,  # Balanced creativity for results presentation
+                    max_tokens=400,   # Reasonable length for results
+                    top_p=0.9
+                )
+                llm_response = chat_completion.choices[0].message.content.strip()
+            else:
+                # Fallback if Groq is not available
+                llm_response = "I've completed your flight search! Here are the results:"
             
             # Combine with formatted flight data
             formatted_results = self.format_flight_results_for_display(flight_results, search_type)
@@ -771,11 +835,14 @@ Keep it conversational and informative:
                 headers=self.api_headers,
                 json=search_payload,
                 timeout=30
-            )            
+            )
+            
+            # Only consider status code 200 as successful
             if response.status_code == 200:
                 result = response.json()
                 result["airline"] = airline_name or "All Airlines"
                 result["search_payload"] = search_payload
+                result["status_code"] = 200  # Mark as successful
                 return result
             else:
                 error_msg = f"API request failed with status {response.status_code}"
@@ -798,12 +865,14 @@ Keep it conversational and informative:
         except requests.exceptions.RequestException as e:
             return {
                 "error": f"Network error: {str(e)}", 
-                "airline": airline_name or "All Airlines"
+                "airline": airline_name or "All Airlines",
+                "status_code": 0
             }
         except Exception as e:
             return {
                 "error": f"Unexpected error: {str(e)}", 
-                "airline": airline_name or "All Airlines"
+                "airline": airline_name or "All Airlines",
+                "status_code": 0
             }
     
     def search_flights_parallel(self, payload, booking_info, specific_airline=None):
@@ -839,23 +908,27 @@ Keep it conversational and informative:
                     result = future.result()
                     results.append(result)
                     
-                    if "error" in result:
+                    # Check if this is a successful response (status code 200)
+                    if "error" in result or result.get("status_code") != 200:
                         failed_searches += 1
-                        print(f"❌ {provider}: {result.get('error', 'Unknown error')}")
+                        error_msg = result.get('error', 'Unknown error')
+                        print(f"❌ {provider}: {error_msg}")
                     else:
                         successful_searches += 1
-                        print(f"✅ {provider}: Search completed successfully")
+                        # Extract flight count for logging
+                        extracted_flights = self.extract_flight_information(result)
+                        flight_count = len(extracted_flights)
                         
                 except Exception as e:
                     failed_searches += 1
                     print(f"❌ {provider}: Exception occurred - {str(e)}")
                     results.append({
                         "error": f"Thread execution failed: {str(e)}",
-                        "airline": provider
+                        "airline": provider,
+                        "status_code": 0
                     })
         
-        
-        print(f"📊 Search Summary: {successful_searches} successful API calls, {failed_searches} failed")
+        print(f"📊 Search Summary: {successful_searches} successful, {failed_searches} failed API calls")
         return results
     
     def aggregate_flight_results(self, results):
@@ -867,15 +940,30 @@ Keep it conversational and informative:
         for result in results:
             airline = result.get("airline", "Unknown")
             
-            if "error" in result:
+            # Only consider results with status code 200 as successful
+            if "error" in result or result.get("status_code") != 200:
                 errors.append({
                     "airline": airline,
-                    "error": result["error"]
+                    "error": result.get("error", "API call failed"),
+                    "status_code": result.get("status_code", 0)
                 })
                 continue
             
             successful_results.append(result)
             
+            # Extract structured flight information first
+            extracted_flights = self.extract_flight_information(result)
+            if extracted_flights:
+                for flight in extracted_flights:
+                    flight["source_airline"] = airline
+                    # Add a sortable price field from the lowest fare option
+                    if flight.get('fare_options'):
+                        lowest_fare = min(flight['fare_options'], key=lambda x: x.get('total_fare', 999999))
+                        flight["sortable_price"] = lowest_fare.get('total_fare', 999999)
+                    all_flights.append(flight)
+                continue
+            
+            # Fallback to old method if extraction fails
             flights = None
             if "data" in result and result["data"]:
                 flights = result["data"]
@@ -901,6 +989,11 @@ Keep it conversational and informative:
         
         try:
             def get_price(flight):
+                # First try the sortable_price field from extracted flights
+                if 'sortable_price' in flight:
+                    return flight['sortable_price']
+                
+                # Fallback to old price extraction
                 price_fields = ["price", "totalPrice", "cost", "fare", "amount"]
                 for field in price_fields:
                     if field in flight and flight[field] is not None:
@@ -922,6 +1015,110 @@ Keep it conversational and informative:
             "errors": errors
         }
     
+    def extract_flight_information(self, api_response):
+        """Extract structured flight information from API response"""
+        try:
+            extracted_flights = []
+            
+            # Handle the response structure
+            if isinstance(api_response, dict):
+                itineraries = api_response.get('Itineraries', [])
+                
+                for itinerary in itineraries:
+                    flights_list = itinerary.get('Flights', [])
+                    
+                    for flight in flights_list:
+                        # Extract basic flight info
+                        segments = flight.get('Segments', [])
+                        if not segments:
+                            continue
+                            
+                        # Get the first segment for main flight info
+                        first_segment = segments[0]
+                        
+                        # Extract flight details
+                        flight_info = {
+                            "flight_number": f"{first_segment.get('OperatingCarrier', {}).get('iata', '')}-{first_segment.get('FlightNumber', '')}",
+                            "airline": first_segment.get('OperatingCarrier', {}).get('name', 'Unknown'),
+                            "origin": first_segment.get('From', {}).get('iata', ''),
+                            "destination": first_segment.get('To', {}).get('iata', ''),
+                            "departure_time": self.format_time(first_segment.get('DepartureAt', '')),
+                            "arrival_time": self.format_time(first_segment.get('ArrivalAt', '')),
+                            "duration": self.format_duration(first_segment.get('FlightTime', 0)),
+                            "fare_options": []
+                        }
+                        
+                        # Extract fare options
+                        fares = flight.get('Fares', [])
+                        for fare in fares:
+                            # Extract baggage info
+                            baggage_policy = fare.get('BaggagePolicy', [])
+                            hand_baggage_kg = 0
+                            checked_baggage_kg = 0
+                            
+                            for baggage in baggage_policy:
+                                if baggage.get('Type') == 'carry':
+                                    hand_baggage_kg = baggage.get('WeightLimit', 0)
+                                elif baggage.get('Type') == 'checked':
+                                    checked_baggage_kg = baggage.get('WeightLimit', 0)
+                            
+                            # Extract refund policy
+                            policies = fare.get('Policies', [])
+                            refund_fee_48h = 0
+                            refundable_before_48h = False
+                            
+                            for policy in policies:
+                                if policy.get('Type') == 'refund' and '48 hours' in policy.get('Description', ''):
+                                    refund_fee_48h = policy.get('Charges', 0)
+                                    refundable_before_48h = True
+                                    break
+                            
+                            fare_info = {
+                                "fare_name": fare.get('Name', ''),
+                                "base_fare": fare.get('ChargedBasePrice', 0),
+                                "total_fare": fare.get('ChargedTotalPrice', 0),
+                                "refundable_before_48h": refundable_before_48h,
+                                "refund_fee_48h": refund_fee_48h,
+                                "hand_baggage_kg": hand_baggage_kg,
+                                "checked_baggage_kg": checked_baggage_kg
+                            }
+                            
+                            flight_info["fare_options"].append(fare_info)
+                        
+                        extracted_flights.append(flight_info)
+            
+            return extracted_flights
+            
+        except Exception as e:
+            print(f"❌ Error extracting flight information: {str(e)}")
+            return []
+    
+    def format_time(self, datetime_str):
+        """Format datetime string to HH:MM format"""
+        try:
+            if datetime_str:
+                # Parse the datetime string (format: 2025-08-04T17:30:00+05:00)
+                from datetime import datetime
+                dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+                return dt.strftime('%H:%M')
+        except:
+            pass
+        return 'N/A'
+    
+    def format_duration(self, minutes):
+        """Format duration in minutes to Xh Ym format"""
+        try:
+            if minutes and isinstance(minutes, int):
+                hours = minutes // 60
+                mins = minutes % 60
+                if hours > 0:
+                    return f"{hours}h {mins}m"
+                else:
+                    return f"{mins}m"
+        except:
+            pass
+        return 'N/A'
+
     def format_flight_results_for_display(self, flight_results, search_type="multi_airline"):
         """Format flight results for better display to user"""
         try:
@@ -931,13 +1128,18 @@ Keep it conversational and informative:
                     if "error" in result:
                         return f"❌ Search Error: {result['error']}"
                     
-                    flights_data = result.get('data', result.get('flights', result))
-                    airline_name = result.get('airline', 'Unknown Airline')
-                    
-                    if not flights_data or (isinstance(flights_data, list) and len(flights_data) == 0):
-                        return f"No flights found for {airline_name}."
-                    
-                    return self.format_single_airline_display(flights_data, airline_name)
+                    # Extract structured flight information
+                    extracted_flights = self.extract_flight_information(result)
+                    if extracted_flights:
+                        return self.format_extracted_flights_display(extracted_flights)
+                    else:
+                        flights_data = result.get('data', result.get('flights', result))
+                        airline_name = result.get('airline', 'Unknown Airline')
+                        
+                        if not flights_data or (isinstance(flights_data, list) and len(flights_data) == 0):
+                            return f"No flights found for {airline_name}."
+                        
+                        return self.format_single_airline_display(flights_data, airline_name)
                 else:
                     return "No flight results received."
             
@@ -956,10 +1158,65 @@ Keep it conversational and informative:
                     else:
                         return "I wasn't able to connect to the airline systems right now. Please try again in a few minutes."
                 
-                return self.format_multi_airline_display(flights, total_flights, successful_airlines, errors)
+                # Try to extract structured information from successful results
+                all_extracted_flights = []
+                successful_results = flight_results.get('successful_results', [])
+                
+                for result in successful_results:
+                    if 'error' not in result:
+                        extracted_flights = self.extract_flight_information(result)
+                        all_extracted_flights.extend(extracted_flights)
+                
+                if all_extracted_flights:
+                    return self.format_extracted_flights_display(all_extracted_flights[:10])  # Show top 10
+                else:
+                    return self.format_multi_airline_display(flights, total_flights, successful_airlines, errors)
                 
         except Exception as e:
             return f"I found some flight options but had trouble formatting them. The search was successful though!"
+
+    def format_extracted_flights_display(self, extracted_flights):
+        """Format extracted flight information for clean display"""
+        try:
+            if not extracted_flights:
+                return "No flight information could be extracted."
+            
+            display_text = "🛫 **Flight Options Found:**\n\n"
+            
+            for i, flight in enumerate(extracted_flights[:5], 1):  # Show top 5 flights
+                display_text += f"**Flight {i}: {flight['airline']} {flight['flight_number']}**\n"
+                display_text += f"📍 {flight['origin']} → {flight['destination']}\n"
+                display_text += f"🕐 {flight['departure_time']} → {flight['arrival_time']} ({flight['duration']})\n"
+                
+                # Display fare options
+                if flight.get('fare_options'):
+                    display_text += f"💰 **Fare Options:**\n"
+                    
+                    for fare in flight['fare_options']:
+                        baggage_info = f"Hand: {fare['hand_baggage_kg']}kg"
+                        if fare['checked_baggage_kg'] > 0:
+                            baggage_info += f" | Checked: {fare['checked_baggage_kg']}kg"
+                        else:
+                            baggage_info += " | No checked baggage"
+                        
+                        refund_info = ""
+                        if fare['refundable_before_48h']:
+                            refund_info = f" | Refund fee: PKR {fare['refund_fee_48h']}"
+                        else:
+                            refund_info = " | Non-refundable"
+                        
+                        display_text += f"   • **{fare['fare_name']}**: PKR {fare['total_fare']:,} ({baggage_info}{refund_info})\n"
+                
+                display_text += "\n"
+            
+            if len(extracted_flights) > 5:
+                display_text += f"... and {len(extracted_flights) - 5} more options available\n"
+            
+            return display_text
+            
+        except Exception as e:
+            print(f"Error formatting extracted flights: {e}")
+            return "Flight information found but could not be formatted properly."
 
     def format_single_airline_display(self, flights_data, airline_name):
         """Format single airline flight data for display"""

@@ -560,11 +560,6 @@ def extract_flight_class(query):
     return "economy"
 
 
-import json
-import re
-from typing import Dict
-from groq import Groq
-
 def extract_passenger_count(query: str) -> Dict[str, int]:
     """
     Extract passenger count using Groq's fast LLM models
@@ -597,12 +592,12 @@ Extract passenger counts from this travel query. Return ONLY a JSON object, no e
 Query: "{query}"
 
 RULES:
-- Adults: 18+ years (speaker, wife, husband, parents, friends)
-- Children: 2-17 years (kids, son, daughter, child)  
-- Infants: 0-2 years (baby, infant, newborn)
+- Adults: 18+ years (speaker, wife, husband, parents, friends, child, etc)
+- Children: 2-17 years (kids, son, daughter, child, etc)  
+- Infants: 0-2 years (baby, infant, newborn, etc)
 - "I with wife" = 2 adults total
 - "our 3 children" = 3 children
-- Age numbers override: "2 10yr olds" = 2 children
+- Age always overrides labels. "2 20 year old children" = 2 adults (not children)
 - At least 1 adult if children/infants present
 
 EXAMPLES:
@@ -629,7 +624,7 @@ Return only JSON:
                     "content": prompt
                 }
             ],
-            model="meta-llama/llama-4-scout-17b-16e-instruct",  # Fast and efficient model
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",  # Fast and efficient model
             temperature=0.1,  # Low temperature for consistent results
             max_tokens=150,   # Limit response length
             top_p=0.9
