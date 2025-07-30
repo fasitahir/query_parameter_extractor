@@ -713,14 +713,20 @@ Generate message:
                 context = f"Single airline search completed. Results type: {type(flight_results)}"
                 
             else:
-                # Multi-airline results
+                # Multi-airline results - use the correct metrics
                 total_flights = flight_results.get('total_flights', 0) if isinstance(flight_results, dict) else 0
-                successful_airlines = flight_results.get('successful_airlines', 0) if isinstance(flight_results, dict) else 0
+                airlines_with_flights = flight_results.get('airlines_with_flights', 0) if isinstance(flight_results, dict) else 0
+                successful_api_calls = flight_results.get('successful_airlines', 0) if isinstance(flight_results, dict) else 0
                 
                 if total_flights == 0:
-                    context = f"Multi-airline search completed but no flights found. {successful_airlines} airlines responded successfully."
+                    if airlines_with_flights == 0 and successful_api_calls > 0:
+                        # APIs responded successfully but no flights found
+                        context = f"Multi-airline search completed successfully with {successful_api_calls} airlines responding, but no flights are available for your criteria. This could be due to route availability, date restrictions, or booking class limitations."
+                    else:
+                        # No successful API calls
+                        context = f"Multi-airline search completed but encountered issues. {successful_api_calls} airlines responded successfully."
                 else:
-                    context = f"Multi-airline search completed successfully. Found {total_flights} flights across {successful_airlines} airlines."
+                    context = f"Multi-airline search completed successfully. Found {total_flights} flights from {airlines_with_flights} airlines out of {successful_api_calls} airlines that responded."
             
             # Generate natural response about results
             prompt = f"""
@@ -733,6 +739,7 @@ Generate a conversational, helpful response that:
 4. Maintains a helpful, professional tone
 5. Offers next steps or asks what the user would prefer
 6. NEVER mentions booking, payment, or ticket confirmation - only search results
+7. If no flights found despite successful API calls, suggest trying different dates or nearby airports
 
 Keep it conversational and informative:
 """
@@ -937,11 +944,12 @@ Keep it conversational and informative:
         all_flights = []
         errors = []
         successful_results = []
+        successful_with_flights = []  # Track results that actually have flights
         
         for result in results:
             airline = result.get("airline", "Unknown")
             
-            # Only consider results with status code 200 as successful
+            # Only consider results with status code 200 as successful API calls
             if "error" in result or result.get("status_code") != 200:
                 errors.append({
                     "airline": airline,
@@ -955,6 +963,8 @@ Keep it conversational and informative:
             # Extract structured flight information first
             extracted_flights = self.extract_flight_information(result)
             if extracted_flights:
+                # This airline actually returned flights
+                successful_with_flights.append(result)
                 for flight in extracted_flights:
                     flight["source_airline"] = airline
                     # Add a sortable price field from the lowest fare option
@@ -963,8 +973,12 @@ Keep it conversational and informative:
                         flight["sortable_price"] = lowest_fare.get('total_fare', 999999)
                     all_flights.append(flight)
                 continue
+            else:
+                # API call was successful but no flights found
+                print(f"📭 {airline}: API call successful but no flights found")
+                continue
             
-            # Fallback to old method if extraction fails
+            # Fallback to old method if extraction fails (should rarely happen now)
             flights = None
             if "data" in result and result["data"]:
                 flights = result["data"]
@@ -979,6 +993,7 @@ Keep it conversational and informative:
                     flights = [result]
             
             if flights:
+                successful_with_flights.append(result)
                 if isinstance(flights, list):
                     for flight in flights:
                         if isinstance(flight, dict):
@@ -1008,11 +1023,15 @@ Keep it conversational and informative:
         except Exception as e:
             print(f"Warning: Could not sort flights by price: {e}")
         
+        print(f"📊 Final Results: {len(successful_with_flights)} airlines with flights, {len(all_flights)} total flights")
+        
         return {
             "flights": all_flights[:50],
             "total_flights": len(all_flights),
-            "successful_airlines": len(successful_results),
+            "successful_airlines": len(successful_results),  # API calls that succeeded
+            "airlines_with_flights": len(successful_with_flights),  # Airlines that actually had flights
             "successful_results": successful_results,
+            "results_with_flights": successful_with_flights,  # Results that actually contain flights
             "errors": errors
         }
     
@@ -1024,6 +1043,11 @@ Keep it conversational and informative:
             # Handle the response structure
             if isinstance(api_response, dict):
                 itineraries = api_response.get('Itineraries', [])
+                
+                # Check if itineraries is empty or None
+                if not itineraries:
+                    print(f"📋 No itineraries found in API response for {api_response.get('airline', 'Unknown airline')}")
+                    return []
                 
                 for itinerary in itineraries:
                     flights_list = itinerary.get('Flights', [])
@@ -1069,9 +1093,9 @@ Keep it conversational and informative:
                             refundable_before_48h = False
                             
                             for policy in policies:
-                                if policy.get('Type') == 'refund' and '48 hours' in policy.get('Description', ''):
+                                if policy.get('Type') == 'refund':
                                     refund_fee_48h = policy.get('Charges', 0)
-                                    refundable_before_48h = True
+                                    refundable_before_48h = refund_fee_48h > 0
                                     break
                             
                             fare_info = {
@@ -1087,6 +1111,8 @@ Keep it conversational and informative:
                             flight_info["fare_options"].append(fare_info)
                         
                         extracted_flights.append(flight_info)
+                        
+                print(f"✅ Extracted {len(extracted_flights)} flights from {api_response.get('airline', 'Unknown airline')}")
             
             return extracted_flights
             
@@ -1149,21 +1175,24 @@ Keep it conversational and informative:
                     return "No flight results received from the search."
                 
                 total_flights = flight_results.get('total_flights', 0)
-                successful_airlines = flight_results.get('successful_airlines', 0)
+                airlines_with_flights = flight_results.get('airlines_with_flights', 0)
+                successful_api_calls = flight_results.get('successful_airlines', 0)
                 flights = flight_results.get('flights', [])
                 errors = flight_results.get('errors', [])
                 
                 if total_flights == 0:
-                    if successful_airlines > 0:
-                        return f"I searched {successful_airlines + len(errors)} airlines successfully, but unfortunately no flights are available for your specific criteria. You might want to try different dates or nearby airports."
+                    if successful_api_calls > 0:
+                        # APIs responded but no flights available
+                        total_contacted = successful_api_calls + len(errors)
+                        return f"I searched {total_contacted} airlines successfully, but unfortunately no flights are available for your specific criteria. You might want to try different dates or nearby airports."
                     else:
                         return "I wasn't able to connect to the airline systems right now. Please try again in a few minutes."
                 
-                # Try to extract structured information from successful results
+                # Try to extract structured information from results that actually have flights
                 all_extracted_flights = []
-                successful_results = flight_results.get('successful_results', [])
+                results_with_flights = flight_results.get('results_with_flights', [])
                 
-                for result in successful_results:
+                for result in results_with_flights:
                     if 'error' not in result:
                         extracted_flights = self.extract_flight_information(result)
                         all_extracted_flights.extend(extracted_flights)
@@ -1171,7 +1200,7 @@ Keep it conversational and informative:
                 if all_extracted_flights:
                     return self.format_extracted_flights_display(all_extracted_flights[:10])  # Show top 10
                 else:
-                    return self.format_multi_airline_display(flights, total_flights, successful_airlines, errors)
+                    return self.format_multi_airline_display(flights, total_flights, airlines_with_flights, errors)
                 
         except Exception as e:
             return f"I found some flight options but had trouble formatting them. The search was successful though!"
@@ -1249,10 +1278,10 @@ Keep it conversational and informative:
         except Exception as e:
             return f"Found flights with {airline_name} but couldn't display all details."
 
-    def format_multi_airline_display(self, flights, total_flights, successful_airlines, errors):
+    def format_multi_airline_display(self, flights, total_flights, airlines_with_flights, errors):
         """Format multi-airline flight data for display"""
         try:
-            display_text = f"Great news! I found {total_flights} flight options across {successful_airlines} airlines:\n\n"
+            display_text = f"Great news! I found {total_flights} flight options from {airlines_with_flights} airlines:\n\n"
             
             if not flights:
                 return "I completed the search but couldn't retrieve the detailed flight information."
