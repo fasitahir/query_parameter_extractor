@@ -1216,15 +1216,23 @@ def extract_travel_info(query):
 
 # Enhanced command-line interface
 if __name__ == "__main__":
+    print("🚀 Travel Parameter Extraction System")
+    print("💡 For better experience, use: streamlit run streamlit_ui.py")
+    print("-" * 50)
+    
     while True:
-        query = input("Enter your travel query: ").strip()
+        query = input("\n📝 Enter your travel query (or 'exit' to quit): ").strip()
         if query.lower() in ["exit", "quit"]:
-            print("Goodbye!")
+            print("✈️ Safe travels! Goodbye!")
             break
         if not query:
             continue
         try:
             result = extract_travel_info(query)
-            print(result)
+            print("\n🔍 Extracted Information:")
+            for key, value in result.items():
+                if value:
+                    print(f"  {key}: {value}")
+            print()
         except Exception as e:
-            print(f"Error processing query: {e}")
+            print(f"❌ Error processing query: {e}")
