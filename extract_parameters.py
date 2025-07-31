@@ -1059,39 +1059,54 @@ def extract_dates(text, flight_type=None):
 
         # FIXED: Parse with age filtering - also look for relative date patterns
         relative_date_patterns = [
-            r'\bnext\s+(\w+day)\b',  # next thursday, next monday, etc.
-            r'\bthis\s+(\w+day)\b',  # this friday, this saturday, etc.
-            r'\b(\w+day)\s+next\b',  # thursday next, friday next, etc.
+            (r'\bnext\s+(\w+day)\b', 'next'),    # next thursday, next monday, etc.
+            (r'\bthis\s+(\w+day)\b', 'this'),    # this friday, this saturday, etc.
+            (r'\b(\w+day)\s+next\b', 'next'),    # thursday next, friday next, etc.
         ]
         
-        for pattern in relative_date_patterns:
+        for pattern, prefix in relative_date_patterns:
             matches = re.findall(pattern, normalized_text)
             for match in matches:
                 try:
                     cal = parsedatetime.Calendar()
                     if isinstance(match, tuple):
-                        date_phrase = ' '.join(match)
+                        day_name = match[0]
                     else:
-                        date_phrase = f"next {match}" if pattern.startswith(r'\b(\w+day)') else f"next {match}"
+                        day_name = match
+                    
+                    # Construct the proper date phrase based on the prefix
+                    if prefix == 'this':
+                        date_phrase = f"this {day_name}"
+                    else:  # prefix == 'next'
+                        date_phrase = f"next {day_name}"
+                    
+                    print(f"🔍 Parsing relative date: '{date_phrase}' from text: '{normalized_text}'")
                     
                     time_struct, parse_status = cal.parse(date_phrase)
                     if parse_status >= 1:
                         parsed_date = datetime(*time_struct[:6])
+                        print(f"✅ Parsed '{date_phrase}' to: {parsed_date.strftime('%Y-%m-%d')}")
                         if parsed_date.year <= today.year + 2:
                             return parsed_date.strftime("%Y-%m-%d")
-                except:
+                except Exception as e:
+                    print(f"❌ Error parsing '{date_phrase}': {e}")
                     pass
 
         # FIXED: Parse with age filtering
         try:
             cal = parsedatetime.Calendar()
+            print(f"🔍 Final parsing attempt with: '{normalized_text}'")
             time_struct, parse_status = cal.parse(normalized_text)
             if parse_status >= 1:
                 parsed_date = datetime(*time_struct[:6])
+                print(f"✅ Final parsed date: {parsed_date.strftime('%Y-%m-%d')} (today is {today.strftime('%Y-%m-%d')})")
                 # FIXED: Ensure the parsed date is reasonable (not affected by age mentions)
                 if parsed_date.year <= today.year + 2:
                     return parsed_date.strftime("%Y-%m-%d")
-        except:
+                else:
+                    print(f"❌ Date rejected - too far in future: {parsed_date.year}")
+        except Exception as e:
+            print(f"❌ Final parsing failed: {e}")
             pass
 
         return None
