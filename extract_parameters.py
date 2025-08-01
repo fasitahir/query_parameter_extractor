@@ -42,7 +42,33 @@ city_to_iata = {
     "dalbandin": "DBA",
     "muzaffarabad": "MFG",
     "rahim yar khan": "RYK",
-    "nawabshah": "WNS"
+    "nawabshah": "WNS",
+    # International cities
+    "dubai": "DXB",
+    "abu dhabi": "AUH",
+    "sharjah": "SHJ",
+    "doha": "DOH",
+    "muscat": "MCT",
+    "kuwait": "KWI",
+    "riyadh": "RUH",
+    "jeddah": "JED",
+    "dammam": "DMM",
+    "manama": "BAH",
+    "london": "LHR",
+    "manchester": "MAN",
+    "birmingham": "BHX",
+    "paris": "CDG",
+    "istanbul": "IST",
+    "bangkok": "BKK",
+    "kuala lumpur": "KUL",
+    "singapore": "SIN",
+    "hong kong": "HKG",
+    "beijing": "PEK",
+    "shanghai": "PVG",
+    "tokyo": "NRT",
+    "new york": "JFK",
+    "toronto": "YYZ",
+    "vancouver": "YVR"
 }
 
 
@@ -383,7 +409,6 @@ def extract_flight_class(query):
     is_modification_query = " now " in query_lower or query_lower.strip().startswith("now ")
     
     if is_modification_query:
-        print("🔄 Detected modification query for flight class extraction")
         
         # Find the "Now" part and focus class extraction on it
         if " now " in query_lower:
@@ -392,7 +417,6 @@ def extract_flight_class(query):
             now_start = 4  # Skip "now "
             
         now_part = query_lower[now_start:].strip()
-        print(f"🔍 Analyzing flight class from modification part: '{now_part}'")
         
         # Check if the "Now" part contains any class information
         class_indicators = [
@@ -405,10 +429,8 @@ def extract_flight_class(query):
         if has_class_info:
             # Use the "Now" part for class extraction
             text_for_parsing = now_part
-            print(f"🔍 Found class info in modification part, using: '{text_for_parsing}'")
         else:
             # No class info in "Now" part, use original text to preserve existing class
-            print("🔍 No class info in modification part, using full text to preserve class")
             text_for_parsing = query_lower
     else:
         # Use full text for normal queries
@@ -657,7 +679,6 @@ Return only JSON:
         )
         
         response_text = chat_completion.choices[0].message.content.strip()
-        print(f"Groq raw response: {response_text}")
         
         # Extract and clean JSON
         passenger_data = extract_and_clean_json(response_text)
@@ -842,7 +863,6 @@ def fallback_extraction(query: str) -> Dict[str, int]:
     # Step 7: Apply validation
     adults, children, infants = validate_passenger_counts(adults, children, infants)
     
-    print(f"🔧 Fallback result: {adults} adults, {children} children, {infants} infants")
     return {
         'adults': adults,
         'children': children,
@@ -861,7 +881,6 @@ def extract_dates(text, flight_type=None):
     is_modification_query = " now " in original_text or original_text.strip().startswith("now ")
     
     if is_modification_query:
-        print("🔄 Detected modification query for date extraction")
         
         # Find the "Now" part and focus date extraction on it
         if " now " in original_text:
@@ -870,7 +889,6 @@ def extract_dates(text, flight_type=None):
             now_start = 4  # Skip "now "
             
         now_part = original_text[now_start:].strip()
-        print(f"🔍 Analyzing date from modification part: '{now_part}'")
         
         # Check if the "Now" part contains any date information
         # Look for common date indicators
@@ -890,7 +908,6 @@ def extract_dates(text, flight_type=None):
             text_for_parsing = now_part
         else:
             # No date info in "Now" part, use original text to preserve existing dates
-            print("🔍 No date info in modification part, using full text to preserve dates")
             text_for_parsing = original_text
     else:
         # Use full text for normal queries
@@ -923,6 +940,68 @@ def extract_dates(text, flight_type=None):
 
     # ---- RETURN FLIGHT HANDLING ---- #
     if flight_type == "return":
+        # SPECIAL HANDLING: For "Now" modification queries, check if it's specifically for return date
+        if is_modification_query and has_date_info:
+            # Check if the modification is specifically about return date
+            return_change_patterns = [
+                r'change\s+return\s+date\s+to\s+(.+)',
+                r'return\s+date\s+to\s+(.+)',
+                r'return\s+on\s+(.+)',
+                r'back\s+on\s+(.+)',
+                r'come\s+back\s+on\s+(.+)',
+                r'returning\s+on\s+(.+)',
+                r'return\s+(.+)'
+            ]
+            
+            departure_change_patterns = [
+                r'change\s+departure\s+date\s+to\s+(.+)',
+                r'departure\s+date\s+to\s+(.+)',
+                r'depart\s+on\s+(.+)',
+                r'leave\s+on\s+(.+)',
+                r'departing\s+on\s+(.+)',
+                r'go\s+on\s+(.+)'
+            ]
+            
+            # Check for return date change
+            for pattern in return_change_patterns:
+                match = re.search(pattern, now_part)
+                if match:
+                    date_str = re.sub(r'\b(of|the)\b', '', match.group(1).strip().lower())
+                    if date_str in special_date_map:
+                        return None, special_date_map[date_str]  # departure=None, return=extracted_date
+                    else:
+                        try:
+                            cal = parsedatetime.Calendar()
+                            time_struct, parse_status = cal.parse(date_str)
+                            if parse_status >= 1:
+                                parsed_date = datetime(*time_struct[:6])
+                                if parsed_date.year <= today.year + 2:
+                                    print(f"✅ Final parsed date: {parsed_date.strftime('%Y-%m-%d')} (today is {today.strftime('%Y-%m-%d')})")
+                                    return None, parsed_date.strftime("%Y-%m-%d")  # departure=None, return=extracted_date
+                        except Exception as e:
+                            print(f"❌ Error parsing return date '{date_str}': {e}")
+                            pass
+            
+            # Check for departure date change
+            for pattern in departure_change_patterns:
+                match = re.search(pattern, now_part)
+                if match:
+                    date_str = re.sub(r'\b(of|the)\b', '', match.group(1).strip().lower())
+                    if date_str in special_date_map:
+                        return special_date_map[date_str], None  # departure=extracted_date, return=None
+                    else:
+                        try:
+                            cal = parsedatetime.Calendar()
+                            time_struct, parse_status = cal.parse(date_str)
+                            if parse_status >= 1:
+                                parsed_date = datetime(*time_struct[:6])
+                                if parsed_date.year <= today.year + 2:
+                                    print(f"✅ Final parsed date: {parsed_date.strftime('%Y-%m-%d')} (today is {today.strftime('%Y-%m-%d')})")
+                                    return parsed_date.strftime("%Y-%m-%d"), None  # departure=extracted_date, return=None
+                        except Exception as e:
+                            print(f"❌ Error parsing departure date '{date_str}': {e}")
+                            pass
+        
         # Strategy 1: Between X and Y
         between_pattern = r'between\s+([^0-9]+?)\s+and\s+([^0-9]+?)(?:\s|$|,|\.)'
         between_matches = re.findall(between_pattern, normalized_text, re.IGNORECASE)
@@ -1080,12 +1159,10 @@ def extract_dates(text, flight_type=None):
                     else:  # prefix == 'next'
                         date_phrase = f"next {day_name}"
                     
-                    print(f"🔍 Parsing relative date: '{date_phrase}' from text: '{normalized_text}'")
                     
                     time_struct, parse_status = cal.parse(date_phrase)
                     if parse_status >= 1:
                         parsed_date = datetime(*time_struct[:6])
-                        print(f"✅ Parsed '{date_phrase}' to: {parsed_date.strftime('%Y-%m-%d')}")
                         if parsed_date.year <= today.year + 2:
                             return parsed_date.strftime("%Y-%m-%d")
                 except Exception as e:
@@ -1095,11 +1172,9 @@ def extract_dates(text, flight_type=None):
         # FIXED: Parse with age filtering
         try:
             cal = parsedatetime.Calendar()
-            print(f"🔍 Final parsing attempt with: '{normalized_text}'")
             time_struct, parse_status = cal.parse(normalized_text)
             if parse_status >= 1:
                 parsed_date = datetime(*time_struct[:6])
-                print(f"✅ Final parsed date: {parsed_date.strftime('%Y-%m-%d')} (today is {today.strftime('%Y-%m-%d')})")
                 # FIXED: Ensure the parsed date is reasonable (not affected by age mentions)
                 if parsed_date.year <= today.year + 2:
                     return parsed_date.strftime("%Y-%m-%d")

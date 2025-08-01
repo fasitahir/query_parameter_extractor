@@ -213,8 +213,9 @@ def process_conversation_turn(user_input: str):
         
         add_to_chat(search_result["response"], "assistant")
         
-        if search_result.get("flight_results"):
-            st.session_state.search_results = search_result["flight_results"]
+        # Don't store separate flight results since they're already in the chat response
+        # if search_result.get("flight_results"):
+        #     st.session_state.search_results = search_result["flight_results"]
         
         return True  # Indicates search was performed
     
@@ -272,11 +273,21 @@ def display_chat_history():
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.markdown(f"""
-                <div class="assistant-message">
-                    🤖 {chat['message']}
-                </div>
-                """, unsafe_allow_html=True)
+                # Check if this is a flight search response (contains markdown flight formatting)
+                message = chat['message']
+                if ('🛫' in message and '**Flight' in message) or ('Flight Options Found' in message):
+                    # This is a flight search response with markdown - render it properly
+                    st.markdown('<div class="assistant-message">', unsafe_allow_html=True)
+                    st.markdown("🤖")
+                    st.markdown(message)  # Let Streamlit render the markdown
+                    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    # Regular message - display as before
+                    st.markdown(f"""
+                    <div class="assistant-message">
+                        🤖 {chat['message']}
+                    </div>
+                    """, unsafe_allow_html=True)
         
         st.markdown('</div>', unsafe_allow_html=True)
     else:
@@ -493,9 +504,9 @@ def main():
     # Show current booking info if available
     display_current_booking_info()
     
-    # Show flight results if available
-    if st.session_state.search_results:
-        display_flight_results(st.session_state.search_results)
+    # Show flight results if available (disabled since results are now in chat)
+    # if st.session_state.search_results:
+    #     display_flight_results(st.session_state.search_results)
     
     # Chat input at the bottom
     st.markdown('<div class="input-container">', unsafe_allow_html=True)
